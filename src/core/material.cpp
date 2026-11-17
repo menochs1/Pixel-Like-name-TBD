@@ -64,7 +64,7 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
   water.density = 1000.0f;
   water.color = {48, 104, 196};
   water.color_variation = 10;
-  water.dispersion = 5;
+  water.dispersion = 8;
   water.conductivity = 0.6f;
   ids.water = registry.add(std::move(water));
 

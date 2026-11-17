@@ -189,3 +189,51 @@ TEST(only_dirty_regions_are_scanned) {
   CHECK(st.active_chunks <= 2);
   CHECK(st.cells_scanned < 64);
 }
+
+// Chunks and dirty rects are only an optimisation: skipping sleeping cells must
+// give exactly the same world as updating every cell every step. A mismatch here
+// shows up in play as liquids terracing along chunk edges.
+TEST(chunk_sleeping_matches_updating_everything) {
+  Fixture f;
+  px::World chunked(6, 3, f.materials, 0xC0FFEE);
+  px::World full(6, 3, f.materials, 0xC0FFEE);
+  for (px::World* w : {&chunked, &full}) {
+    w->fill_rect(0, w->height() - 8, w->width(), 8, f.ids.stone);
+    w->fill_rect(150, 120, 30, 6, f.ids.stone);
+    w->fill_rect(10, 40, 100, 140, f.ids.water);
+    w->fill_rect(200, 10, 40, 60, f.ids.sand);
+  }
+  bool identical = true;
+  for (int s = 0; s < 400 && identical; ++s) {
+    px::step(chunked);
+    full.wake_all();
+    px::step(full);
+    for (int y = 0; y < full.height() && identical; ++y)
+      for (int x = 0; x < full.width(); ++x)
+        if (chunked.get(x, y) != full.get(x, y)) {
+          identical = false;
+          break;
+        }
+  }
+  CHECK(identical);
+}
+
+TEST(water_crosses_chunk_edges_without_terracing) {
+  Fixture f;
+  px::World w(6, 3, f.materials, 0xC0FFEE);
+  w.fill_rect(0, w.height() - 8, w.width(), 8, f.ids.stone);
+  w.fill_rect(10, 40, 100, 140, f.ids.water);
+  run(w, 400);  // the initial surge sloshes for a few seconds, then settles
+  int min_top = w.height(), max_top = 0;
+  for (int x = 0; x < w.width(); ++x) {
+    int top = w.height();
+    for (int y = 0; y < w.height(); ++y)
+      if (w.get(x, y) == f.ids.water) {
+        top = y;
+        break;
+      }
+    min_top = std::min(min_top, top);
+    max_top = std::max(max_top, top);
+  }
+  CHECK(max_top - min_top <= 2);  // one flat sheet across all six chunks
+}

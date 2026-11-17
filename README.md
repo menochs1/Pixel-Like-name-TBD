@@ -94,11 +94,18 @@ Each step (`px::step`, fixed at 60 per second):
 3. Each cell runs the rule for its phase:
    - **Powder** falls (accelerating up to 3 cells/step), else slides diagonally.
    - **Liquid** falls, slides diagonally, else flows sideways up to its
-     `dispersion` distance, stopping early over drops.
+     `dispersion` distance, stopping early over drops. Each liquid cell keeps
+     the direction it last flowed in (`velocity_x`) until blocked, so water
+     surges and spreads like a current instead of jittering in place.
    - Movers displace lighter liquids/gases (sand sinks through water).
-4. Every move wakes the 3×3 neighbourhood of both cells into the *next* step's
-   dirty rects, possibly in neighbouring chunks. Cells that cannot move are not
-   re-woken, so finished regions go to sleep.
+4. Every move wakes the 3×3 neighbourhood of both cells, possibly in
+   neighbouring chunks. The wake goes into the current step's dirty rect (so a
+   cell freed mid-step, like the one above a gap, still moves this step) and
+   into the next step's. Cells that cannot move are not re-woken, so finished
+   regions go to sleep.
+
+Chunking is purely an optimisation: a test checks that the chunked simulation
+produces exactly the same world as updating every cell every step.
 
 A per-cell clock byte stops a cell that has already moved this step from being
 updated again.
@@ -110,10 +117,10 @@ Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
 
 | Metric | Value |
 | --- | --- |
-| Mean step | 4.3 ms |
-| p95 step | 5.9 ms |
-| Cells scanned per step | ~210k |
-| Memory | 5 bytes/cell (~20 KiB per chunk; 10M cells ≈ 50 MiB) |
+| Mean step | 4.5 ms |
+| p95 step | 7.2 ms |
+| Cells scanned per step | ~166k |
+| Memory | 6 bytes/cell (~24 KiB per chunk; 10M cells ≈ 60 MiB) |
 
 ## Known limitations / next steps
 

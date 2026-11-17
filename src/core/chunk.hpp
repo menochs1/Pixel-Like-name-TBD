@@ -37,16 +37,17 @@ struct DirtyRect {
 /// A 64x64 block of cells stored as a structure of arrays. Each array is
 /// indexed by (local_y << kChunkShift) | local_x.
 ///
-/// Memory: 2 + 1 + 1 + 1 = 5 bytes per cell, ~20 KiB per chunk, so a
-/// 10-million-cell world is ~50 MiB. Temperature, health and state flags join
+/// Memory: 2 + 1 + 1 + 1 + 1 = 6 bytes per cell, ~24 KiB per chunk, so a
+/// 10-million-cell world is ~60 MiB. Temperature, health and state flags join
 /// as further arrays in later roadmap steps.
 struct Chunk {
   std::array<MaterialId, kChunkArea> material{};
   std::array<std::int8_t, kChunkArea> velocity_y{};  // cells/step falling speed
+  std::array<std::int8_t, kChunkArea> velocity_x{};  // liquids: -1/0/+1 flow direction
   std::array<std::uint8_t, kChunkArea> shade{};      // 0..15 colour variant
   std::array<std::uint8_t, kChunkArea> clock{};      // last step this cell moved/updated
 
-  DirtyRect dirty;       // being processed this step
+  DirtyRect dirty;       // being processed this step (can grow mid-step)
   DirtyRect next_dirty;  // collected this step, processed next step
 
   static constexpr int index(int local_x, int local_y) { return (local_y << kChunkShift) | local_x; }

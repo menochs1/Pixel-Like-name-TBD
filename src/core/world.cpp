@@ -25,6 +25,7 @@ void World::set(int x, int y, MaterialId material) {
   const int i = local_index(x, y);
   c.material[i] = material;
   c.velocity_y[i] = 0;
+  c.velocity_x[i] = 0;
   c.shade[i] = static_cast<std::uint8_t>(cell_hash(seed_, x, y, 0) & 0x0F);
   c.clock[i] = 0;
   wake(x, y);
@@ -54,11 +55,17 @@ void World::clear() {
 }
 
 void World::wake(int x, int y) {
+  // Wake into both the step in progress and the next one. Waking only the next
+  // step delays a neighbour that becomes free mid-step (e.g. the cell above a
+  // gap) by one tick whenever it sits outside the current dirty rect, and those
+  // delays pile up at chunk edges as visible terraces in flowing liquid.
   const int lx = x & kChunkMask;
   const int ly = y & kChunkMask;
   // Fast path: the 3x3 neighbourhood lies inside one chunk (true for ~94% of cells).
   if (lx > 0 && lx < kChunkMask && ly > 0 && ly < kChunkMask && in_bounds(x, y)) {
-    chunk_for(x, y).next_dirty.include_rect(lx - 1, ly - 1, lx + 1, ly + 1);
+    Chunk& c = chunk_for(x, y);
+    c.dirty.include_rect(lx - 1, ly - 1, lx + 1, ly + 1);
+    c.next_dirty.include_rect(lx - 1, ly - 1, lx + 1, ly + 1);
     return;
   }
   for (int dy = -1; dy <= 1; ++dy) {
@@ -66,7 +73,9 @@ void World::wake(int x, int y) {
     for (int dx = -1; dx <= 1; ++dx) {
       const int nx = x + dx;
       if (!in_bounds(nx, ny)) continue;
-      chunk_for(nx, ny).next_dirty.include(nx & kChunkMask, ny & kChunkMask);
+      Chunk& c = chunk_for(nx, ny);
+      c.dirty.include(nx & kChunkMask, ny & kChunkMask);
+      c.next_dirty.include(nx & kChunkMask, ny & kChunkMask);
     }
   }
 }
