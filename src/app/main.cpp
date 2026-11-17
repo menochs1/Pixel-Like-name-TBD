@@ -70,6 +70,12 @@ void draw_brush_outline(std::uint32_t* pixels, int w, int h, int cx, int cy, int
   }
 }
 
+void report_error(const char* what) {
+  std::fprintf(stderr, "%s failed: %s\n", what, SDL_GetError());
+  std::string msg = std::string(what) + " failed: " + SDL_GetError();
+  SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Pixel Sandbox", msg.c_str(), nullptr);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -85,7 +91,7 @@ int main(int argc, char** argv) {
   px::PixelRenderer renderer(materials);
 
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-    std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+    report_error("SDL_Init");
     return 1;
   }
   const int w = world.width();
@@ -93,7 +99,7 @@ int main(int argc, char** argv) {
   SDL_Window* window = SDL_CreateWindow("Pixel Sandbox", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                         w * kWindowScale, h * kWindowScale, SDL_WINDOW_RESIZABLE);
   if (!window) {
-    std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+    report_error("SDL_CreateWindow");
     SDL_Quit();
     return 1;
   }
@@ -101,7 +107,7 @@ int main(int argc, char** argv) {
   SDL_Renderer* sdl_renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
   if (!sdl_renderer) sdl_renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
   if (!sdl_renderer) {
-    std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+    report_error("SDL_CreateRenderer");
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 1;

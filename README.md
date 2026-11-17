@@ -32,6 +32,19 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
+Cross-compile a Windows build from Linux (needs `g++-mingw-w64-x86-64-posix` and
+the [SDL2 MinGW dev package](https://github.com/libsdl-org/SDL/releases)):
+
+```bash
+cmake -S . -B build-win -DCMAKE_BUILD_TYPE=Release -DPX_BUILD_TESTS=OFF \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+  -DCMAKE_PREFIX_PATH=/path/to/SDL2-2.30.9/x86_64-w64-mingw32
+cmake --build build-win
+```
+
+Ship `pixel_sandbox.exe` with `SDL2.dll` (from the SDL package's `bin/`) beside it;
+the C++ runtime is linked statically.
+
 Run the sandbox:
 
 ```bash

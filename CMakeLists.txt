@@ -20,6 +20,11 @@ else()
   set(PX_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion)
 endif()
 
+if(MINGW)
+  # Bundle the C++ runtime so the .exe only needs SDL2.dll next to it.
+  add_link_options(-static-libgcc -static-libstdc++ -static)
+endif()
+
 # --- Core simulation + world generation: no external dependencies, no rendering.
 add_library(px_core
   src/core/material.cpp
@@ -38,13 +43,13 @@ target_compile_options(px_render PRIVATE ${PX_WARNINGS})
 if(PX_BUILD_APP)
   find_package(SDL2 QUIET)
   if(SDL2_FOUND)
-    add_executable(pixel_sandbox src/app/main.cpp)
+    add_executable(pixel_sandbox WIN32 src/app/main.cpp)  # WIN32: no console window on Windows
     target_link_libraries(pixel_sandbox PRIVATE px_render)
     if(TARGET SDL2::SDL2)
-      target_link_libraries(pixel_sandbox PRIVATE SDL2::SDL2)
-      if(TARGET SDL2::SDL2main)
+      if(TARGET SDL2::SDL2main)  # must precede SDL2 for MinGW's single-pass linker
         target_link_libraries(pixel_sandbox PRIVATE SDL2::SDL2main)
       endif()
+      target_link_libraries(pixel_sandbox PRIVATE SDL2::SDL2)
     else()
       target_include_directories(pixel_sandbox PRIVATE ${SDL2_INCLUDE_DIRS})
       target_link_libraries(pixel_sandbox PRIVATE ${SDL2_LIBRARIES})
