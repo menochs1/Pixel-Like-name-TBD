@@ -121,8 +121,33 @@ int main(int argc, char** argv) {
   bool paused = false;
   bool single_step = false;
   bool show_dirty = false;
-  bool painting = false;
-  int last_mx = 0, last_my = 0;
+
+  // Painting is driven by mouse events, not by polling the button once per
+  // frame: a click shorter than a frame still paints, and a fast drag paints
+  // every motion segment even if the frame rate drops.
+  bool stroke_active = false;
+  int stroke_x = 0, stroke_y = 0;
+  bool painted_this_frame = false;
+  // SDL_GetMouseState returns window pixels; convert those to world cells.
+  auto to_world = [&](int window_x, int window_y, int& x, int& y) {
+    float lx = 0, ly = 0;
+    SDL_RenderWindowToLogical(sdl_renderer, window_x, window_y, &lx, &ly);
+    x = static_cast<int>(std::floor(lx));
+    y = static_cast<int>(std::floor(ly));
+  };
+  auto stroke_to = [&](int x, int y, bool erase) {
+    const px::MaterialId m = erase ? px::kEmpty : brush.material;
+    const float coverage = erase ? 1.0f : coverage_for(materials, m);
+    if (stroke_active) {
+      paint_line(world, stroke_x, stroke_y, x, y, brush.radius, m, coverage);
+    } else {
+      world.fill_circle(x, y, brush.radius, m, coverage);
+    }
+    stroke_x = x;
+    stroke_y = y;
+    stroke_active = true;
+    painted_this_frame = true;
+  };
 
   using clock = std::chrono::steady_clock;
   auto previous = clock::now();
@@ -133,6 +158,7 @@ int main(int argc, char** argv) {
   px::StepStats last_stats;
 
   for (long frame = 0; running && (max_frames < 0 || frame < max_frames); ++frame) {
+    painted_this_frame = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
       switch (e.type) {
@@ -153,6 +179,22 @@ int main(int argc, char** argv) {
             default: break;
           }
           break;
+        case SDL_MOUSEBUTTONDOWN:
+          if (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT) {
+            // SDL already reports mouse events in logical (world) coordinates
+            // because the renderer has a logical size set.
+            stroke_active = false;
+            stroke_to(e.button.x, e.button.y, e.button.button == SDL_BUTTON_RIGHT);
+          }
+          break;
+        case SDL_MOUSEMOTION:
+          if (e.motion.state & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) {
+            stroke_to(e.motion.x, e.motion.y, (e.motion.state & SDL_BUTTON_LMASK) == 0);
+          }
+          break;
+        case SDL_MOUSEBUTTONUP:
+          if ((SDL_GetMouseState(nullptr, nullptr) & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) == 0) stroke_active = false;
+          break;
         case SDL_MOUSEWHEEL:
           brush.radius = std::clamp(brush.radius + (e.wheel.y > 0 ? 1 : -1), 1, 40);
           break;
@@ -161,23 +203,14 @@ int main(int argc, char** argv) {
       }
     }
 
-    // Mouse position in world cells.
+    // Holding the button still keeps pouring at the cursor.
     int wx = 0, wy = 0;
     const Uint32 buttons = SDL_GetMouseState(&wx, &wy);
-    float lx = 0, ly = 0;
-    SDL_RenderWindowToLogical(sdl_renderer, wx, wy, &lx, &ly);
-    const int mx = static_cast<int>(lx);
-    const int my = static_cast<int>(ly);
-    const bool left = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-    const bool right = (buttons & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
-    if (left || right) {
-      const px::MaterialId m = right ? px::kEmpty : brush.material;
-      const float coverage = right ? 1.0f : coverage_for(materials, m);
-      paint_line(world, painting ? last_mx : mx, painting ? last_my : my, mx, my, brush.radius, m, coverage);
+    int mx = 0, my = 0;
+    to_world(wx, wy, mx, my);
+    if (stroke_active && !painted_this_frame && (buttons & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK))) {
+      stroke_to(mx, my, (buttons & SDL_BUTTON_LMASK) == 0);
     }
-    painting = left || right;
-    last_mx = mx;
-    last_my = my;
 
     // Fixed-timestep simulation.
     const auto now = clock::now();

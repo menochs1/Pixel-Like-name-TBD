@@ -65,11 +65,19 @@ Run the sandbox:
 
 The window title shows FPS, simulation time per step and active chunk count.
 
-Run the tests and benchmark:
+Run the tests, benchmark and stress test:
 
 ```bash
 ctest --test-dir build --output-on-failure
 ./build/pixel_bench --scene rain --steps 600            # add --ppm out.ppm to save the final frame
+./build/pixel_stress                                    # worst-case load, editing fuzz, long run; --quick for a short pass
+```
+
+For memory-safety checks, build with AddressSanitizer and UBSan:
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DPX_SANITIZE=ON
+cmake --build build-asan && ./build-asan/px_tests && ./build-asan/pixel_stress
 ```
 
 ## Layout
@@ -126,7 +134,9 @@ Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
 
 - A liquid surface with a partial top layer keeps shuffling sideways and never
   fully sleeps; a settle heuristic will fix this.
-- Single-threaded. The planned path is a checkerboard chunk update (chunks in
+- Single-threaded. A 10-million-cell world with ~3M cells moving at once takes
+  ~115 ms per step (the app's 512×320 world and the 2048×1152 benchmark stay
+  well inside 16.7 ms). The planned path is a checkerboard chunk update (chunks in
   the same phase never touch each other's cells), which the order-independent
   RNG already supports.
 - The world is a fixed grid of chunks; streaming/infinite worlds come with
