@@ -1,10 +1,27 @@
 # Project Instructions
 
-Build this project as a 2D pixel-simulation sandbox inspired by Noita, Powder
-Toy, and cellular-automata simulations—not as a generic platformer. The central
-goal is emergent gameplay from material pixels that interact and change state.
-Evaluate design decisions against simulation quality, scalability, memory use,
-performance, and extensibility.
+Build this project as a 2D pixel-simulation **sandbox**. It is inspired by
+Noita, Powder Toy, and cellular-automata simulations, but it does **not** share
+Noita's gameplay loop and is not a generic platformer. There is no fixed
+progression or combat-driven loop at the core: the player experiments with
+materials and the world, and gameplay emerges from the simulation.
+
+## Core vision
+
+- **Every pixel owns its properties.** A pixel is not just a label such as
+  "sand"; it carries its own element properties (e.g. temperature, density,
+  conductivity, flammability, durability). Two pixels of the same
+  base element can differ and evolve independently.
+- **Elements react like chemistry.** When pixels interact, the result can be a
+  **new material whose properties are derived from its parent materials**
+  (e.g. blended or combined density, conductivity, flammability, melting point,
+  color), not only a swap to a hand-authored material.
+- Reactions are data-driven rules and property-derivation functions, not
+  pair-specific engine code. New elements and reactions should be addable
+  without engine changes.
+- Emergent behavior from these rules is the central goal. Evaluate design
+  decisions against simulation quality, scalability, memory use, performance,
+  and extensibility.
 
 ## Engineering priorities
 
@@ -14,10 +31,10 @@ Implement in this order:
 2. Chunk management
 3. Data-driven material interactions
 4. Deterministic world generation
-5. Character controller
-6. Combat
+5. Sandbox tools (spawn, erase, heat/cool, inspect pixel properties)
+6. Character controller
 7. Lighting
-8. Optional multiplayer
+8. Optional combat and multiplayer
 
 Do not prioritize UI over simulation quality. Keep systems modular and loosely
 coupled, favor composition over inheritance, and avoid monolithic managers.
@@ -26,8 +43,14 @@ visual presentation.
 
 ## Simulation and architecture
 
-- Represent each simulated pixel with a material type, temperature, velocity,
-  health/durability, flammability, conductivity, density, and state flags.
+- Represent each simulated pixel with a material type plus per-pixel
+  properties: temperature, velocity, health/durability, flammability,
+  conductivity, density, and state flags. Per-pixel values may diverge from the
+  material's defaults; materials supply defaults and behavior, pixels hold state.
+- Support derived materials: a reaction can produce a new (possibly runtime-
+  generated) material whose properties are computed from its parents via
+  declarative rules (e.g. average, min/max, weighted mix). Keep the material
+  table extensible for generated entries, and keep results deterministic.
 - Express material behavior as update rules. Support falling and sliding sand,
   flowing water, rising/dispersing smoke, and fire that consumes fuel, produces
   heat, and creates smoke.
@@ -35,7 +58,8 @@ visual presentation.
   throughout the engine. Examples include water plus lava producing stone and
   steam; fire igniting oil; acid dissolving stone; electricity propagating
   through water or conductive materials; fire melting ice; and steam
-  condensing on cold surfaces.
+  condensing on cold surfaces. Reactions should be able to consume reactants,
+  emit products and heat, and derive product properties from the reactants.
 - Treat the following as a suggested modular organization, adapting it to the
   chosen engine and existing project conventions:
 
@@ -60,19 +84,24 @@ visual presentation.
 - Plan for infinite or very large worlds, chunk streaming, deterministic
   generation from a seed, caves, biomes, deposits, and liquids.
 - Use a pixel-art presentation with destructible terrain, dynamic lighting,
-  particle-heavy combat, and material-specific visual effects where appropriate.
+  and material-specific visual effects where appropriate. Make pixel
+  properties and reaction results legible to the player (e.g. inspection view).
 - Target at least 60 FPS and 100,000+ actively simulated pixels. Measure before
   optimizing, and explain performance and memory tradeoffs for architectural
   choices.
 
 ## Roadmap
 
-1. Cellular automata, sand, water, stone, and chunks.
-2. Fire, smoke, oil, and temperature.
-3. Seeded world and cave generation, plus save/load.
-4. Player controller, destruction tools, and basic enemies.
-5. Spells, explosions, and lighting.
-6. Advanced chemistry, electricity, weather, and biome interactions.
+1. Cellular automata, sand, water, stone, and chunks, with per-pixel properties.
+2. Data-driven reaction system, including derived materials; fire, smoke, oil,
+   and temperature.
+3. Sandbox tools: spawn/erase materials, heat/cool, and pixel inspection.
+4. Seeded world and cave generation, plus save/load (including derived
+   materials).
+5. Player controller and world-manipulation tools.
+6. Lighting, explosions, and spells as sandbox tools.
+7. Advanced chemistry, electricity, weather, and biome interactions.
+8. Optional enemies, combat, and multiplayer.
 
 ## Development behavior
 
