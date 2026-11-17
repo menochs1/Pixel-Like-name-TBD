@@ -38,8 +38,14 @@ class World {
   }
 
   /// Places a material, resets its velocity, picks a colour shade and wakes the area.
-  /// Out-of-bounds writes are ignored.
+  /// Temperature becomes the material's spawn temperature (ambient if it has none)
+  /// and limited-life materials get a fresh lifetime. Out-of-bounds writes are ignored.
   void set(int x, int y, MaterialId material);
+
+  Temperature temperature(int x, int y) const {
+    return in_bounds(x, y) ? chunk_for(x, y).temperature[local_index(x, y)] : kAmbient;
+  }
+  void set_temperature(int x, int y, Temperature t);
 
   void fill_rect(int x, int y, int w, int h, MaterialId material);
   /// Fills a disc. `coverage` in (0, 1] places material in that fraction of cells
@@ -50,6 +56,14 @@ class World {
   /// Marks (x, y) and its 8 neighbours for update on the next step.
   void wake(int x, int y);
   void wake_all();
+  /// Marks just (x, y) for update this step (if not yet passed) and next step.
+  void wake_cell(int x, int y) {
+    Chunk& c = chunk_for(x, y);
+    c.dirty.include(x & kChunkMask, y & kChunkMask);
+    c.next_dirty.include(x & kChunkMask, y & kChunkMask);
+  }
+  /// Keeps just (x, y) active for the next step (a cell that is still changing).
+  void keep_awake(int x, int y) { chunk_for(x, y).next_dirty.include(x & kChunkMask, y & kChunkMask); }
 
   Chunk& chunk(int cx, int cy) { return chunks_[static_cast<std::size_t>(cy * width_chunks_ + cx)]; }
   const Chunk& chunk(int cx, int cy) const { return chunks_[static_cast<std::size_t>(cy * width_chunks_ + cx)]; }

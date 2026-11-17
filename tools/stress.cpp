@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -54,13 +55,18 @@ Counts count_all(const px::World& w) {
 }
 
 bool cells_valid(const px::World& w) {
+  const px::MaterialRegistry& reg = w.materials();
   for (int cy = 0; cy < w.height_chunks(); ++cy)
     for (int cx = 0; cx < w.width_chunks(); ++cx) {
       const px::Chunk& c = w.chunk(cx, cy);
       for (int i = 0; i < px::kChunkArea; ++i) {
+        if (c.material[i] >= reg.size()) return false;
         if (c.velocity_y[i] < 0 || c.velocity_y[i] > 8) return false;
         if (c.velocity_x[i] < -1 || c.velocity_x[i] > 1) return false;
         if (c.shade[i] > 15) return false;
+        if (c.temperature[i] < -273 || c.temperature[i] > 2000) return false;
+        // A running lifetime only on materials that can expire or were set burning.
+        if (c.life[i] != 0 && reg.props(c.material[i]).lifetime_max == 0) return false;
       }
     }
   return true;
@@ -89,11 +95,14 @@ Timing time_steps(px::World& w, int steps) {
 
 void load_scenario(const char* name, int wc, int hc, int steps, const px::MaterialRegistry& reg,
                    const std::function<void(px::World&)>& build) {
+  // Burning and reactions create and destroy material by design; only
+  // scenarios without them must conserve every material exactly.
+  const bool checks_mass = std::strstr(name, "fire") == nullptr && std::strstr(name, "lava") == nullptr;
   px::World w(wc, hc, reg, 0xC0FFEE);
   build(w);
   const Counts before = count_all(w);
   const Timing t = time_steps(w, steps);
-  const bool conserved = count_all(w) == before;
+  const bool conserved = !checks_mass || count_all(w) == before;
   const bool fits = t.p95 < 16.7;
   std::printf("  %-34s %5dx%-5d mean %7.2f ms  p95 %7.2f  max %7.2f  %s%s\n", name, w.width(), w.height(), t.mean,
               t.p95, t.max, fits ? "within 60 fps" : "OVER 60 fps budget", conserved ? "" : "  MASS NOT CONSERVED");
@@ -122,6 +131,18 @@ int main(int argc, char** argv) {
   load_scenario("app world, sand/water checkerboard", 8, 5, steps, reg, [&](px::World& w) {
     for (int y = 0; y < w.height() - 60; ++y)
       for (int x = 0; x < w.width(); ++x) w.set(x, y, ((x / 4 + y / 4) & 1) ? ids.sand : ids.water);
+  });
+  load_scenario("app world on fire (oil + wood)", 8, 5, steps, reg, [&](px::World& w) {
+    w.fill_rect(0, w.height() - 8, w.width(), 8, ids.stone);
+    w.fill_rect(0, w.height() - 40, w.width(), 32, ids.oil);
+    for (int x = 4; x < w.width(); x += 10) w.fill_rect(x, 40, 4, w.height() - 80, ids.wood);
+    for (int x = 0; x < w.width(); x += 32) w.fill_rect(x, w.height() - 44, 4, 4, ids.fire);
+  });
+  load_scenario("app world, lava rain into a lake", 8, 5, steps, reg, [&](px::World& w) {
+    w.fill_rect(0, w.height() - 100, w.width(), 100, ids.water);
+    for (int y = 0; y < 60; ++y)
+      for (int x = 0; x < w.width(); ++x)
+        if ((px::cell_hash(3, x, y, 0) & 0xFF) < 60) w.set(x, y, ids.lava);
   });
   load_scenario("2048x1152 rain (benchmark scene)", 32, 18, steps, reg,
                 [&](px::World& w) { px::build_rain_scene(w, ids); });
@@ -179,6 +200,48 @@ int main(int argc, char** argv) {
       }
     }
     std::printf("  %d operations, %d simulation steps: %s\n", ops, steps_run, ok ? "all invariants held" : "BROKEN");
+  }
+
+  // ------------------------------------------------- fuzz, every material
+  const int ops2 = quick ? 3000 : 20000;
+  std::printf("\nEditing fuzz with every material (fire, lava, ice, steam...): %d operations\n", ops2);
+  {
+    px::World w(8, 5, reg, 0xF12E);
+    px::build_demo_scene(w, ids);
+    const px::MaterialId palette[] = {px::kEmpty, ids.stone, ids.sand,  ids.water, ids.oil,   ids.wood,
+                                      ids.fire,   ids.flame, ids.smoke, ids.steam, ids.lava, ids.ice};
+    std::uint32_t seed = 777;
+    auto rnd = [&](int n) {
+      seed = px::hash32(seed + 0x9E3779B9U);
+      return static_cast<int>(seed % static_cast<std::uint32_t>(n));
+    };
+    int steps_run = 0;
+    bool ok = true;
+    for (int op = 0; op < ops2 && ok; ++op) {
+      const int kind = rnd(100);
+      if (kind < 1) {
+        w.clear();
+      } else if (kind < 2) {
+        px::build_demo_scene(w, ids);
+      } else if (kind < 60) {
+        const int x = rnd(w.width() + 400) - 200;
+        const int y = rnd(w.height() + 400) - 200;
+        const int r = rnd(10) == 0 ? rnd(120) : rnd(30);
+        w.fill_circle(x, y, r, palette[rnd(static_cast<int>(std::size(palette)))], rnd(2) ? 1.0f : 0.55f);
+      } else if (kind < 63) {
+        w.set_temperature(rnd(w.width()), rnd(w.height()), static_cast<px::Temperature>(rnd(1600) - 200));
+      } else {
+        const int n = 1 + rnd(8);
+        for (int s = 0; s < n; ++s) px::step(w);
+        steps_run += n;
+        count_all(w);  // flags invalid ids
+        if (!cells_valid(w)) {
+          fail("invalid per-cell data at op " + std::to_string(op));
+          ok = false;
+        }
+      }
+    }
+    std::printf("  %d operations, %d simulation steps: %s\n", ops2, steps_run, ok ? "all invariants held" : "BROKEN");
   }
 
   // ---------------------------------------------------------------- long run

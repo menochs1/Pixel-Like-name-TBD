@@ -19,6 +19,10 @@ class PixelRenderer {
   /// `pixels` must hold at least pitch * world.height() entries.
   void render(const World& world, std::uint32_t* pixels, int pitch) const;
 
+  /// Heat map: blue below 0 °C, dark at ambient, through red and yellow to white
+  /// at 1200 °C+. Materials are faintly outlined so the scene stays readable.
+  void render_temperature(const World& world, std::uint32_t* pixels, int pitch) const;
+
   /// Outlines every chunk's pending dirty rect (debug view of the active-chunk system).
   void draw_dirty_rects(const World& world, std::uint32_t* pixels, int pitch) const;
 

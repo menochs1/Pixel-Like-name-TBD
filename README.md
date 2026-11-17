@@ -2,14 +2,16 @@
 
 A 2D pixel-physics sandbox focused on emergent material interactions and fully
 destructible terrain, written in C++20. Every pixel is a simulated cell of
-material: sand piles up, water flows and levels out, sand sinks through water.
+material: sand piles up, water flows and levels out, oil burns, lava turns
+water to steam and stone, and heat spreads through everything.
 
 Development goals and guidance live in
 [`.github/copilot-instructions.md`](.github/copilot-instructions.md).
 
 ## Status
 
-Roadmap step 1 (cellular automata, sand, water, stone, chunks) is in place:
+Roadmap steps 1 (cellular automata, sand, water, stone, chunks) and 2 (fire,
+smoke, oil, temperature) are in place:
 
 - Chunked world (64×64 chunks) stored as a structure of arrays.
 - Active-region tracking: each chunk keeps a dirty rectangle, so settled areas
@@ -19,7 +21,29 @@ Roadmap step 1 (cellular automata, sand, water, stone, chunks) is in place:
   dispersion. Adding a material means adding a `MaterialDef`, not engine code.
 - Deterministic: all randomness is a hash of (seed, x, y, tick), so the same
   seed and inputs always produce the same world, regardless of update order.
+- Every cell has a temperature. Heat flows between neighbours by
+  conductivity; fire and lava are heat sources; air drifts back to ambient.
+- Burning, boiling, condensing, melting and freezing are all one data rule:
+  above/below a temperature, turn into another material with some chance.
+- Pair reactions (lava + water → stone + steam, fire + water → doused) come
+  from a reaction table, not engine code.
 - Simulation is fully separate from rendering and runs headless.
+
+### Materials
+
+| Material | Phase | Behaviour |
+| --- | --- | --- |
+| stone | solid | inert, conducts heat |
+| sand | powder | piles, sinks through liquids |
+| water | liquid | boils at 100 °C, freezes below −2 °C, douses fire |
+| oil | liquid | floats on water, ignites at 200 °C and burns for ~2.5 s |
+| wood | solid | ignites at 260 °C and burns slowly |
+| fire | solid | 900 °C heat source with a lifetime; throws flames, leaves smoke |
+| flame | gas | short-lived rising tongue of fire |
+| smoke | gas | rises and fades |
+| steam | gas | rises, condenses back to water below 90 °C |
+| lava | liquid | 1200 °C heat source; with water makes stone + steam |
+| ice | solid | starts at −30 °C, melts above 1 °C |
 
 ## Building
 
@@ -56,7 +80,9 @@ Run the sandbox:
 | Left mouse | Paint selected material |
 | Right mouse | Erase |
 | Mouse wheel | Brush size |
-| `1` / `2` / `3` | Sand / water / stone |
+| `1`–`5` | Sand / water / stone / oil / wood |
+| `6`–`0` | Fire / lava / ice / steam / smoke |
+| `T` | Heat view (temperature map) |
 | `Space` | Pause / resume |
 | `.` | Single step while paused |
 | `R` | Rebuild demo scene |
@@ -64,6 +90,8 @@ Run the sandbox:
 | `D` | Show active (dirty) regions |
 
 The window title shows FPS, simulation time per step and active chunk count.
+The demo scene has an oil pit with a plank leading into a wooden tower (drop
+fire on the oil), a water basin, and a lava crucible on the right.
 
 Run the tests, benchmark and stress test:
 
@@ -87,7 +115,7 @@ src/core/     material registry, chunk storage, world, simulator (no dependencie
 src/world/    scene / world generation
 src/render/   World -> ARGB pixel buffer (no SDL)
 src/app/      SDL2 window, input, fixed 60 Hz timestep
-tools/        headless benchmark / snapshot tool
+tools/        headless benchmark / snapshot tool, stress test
 tests/        unit tests (tiny built-in harness, run via CTest)
 ```
 
@@ -99,21 +127,51 @@ Each step (`px::step`, fixed at 60 per second):
 2. Chunks are visited bottom-to-top; inside each dirty rect, rows run
    bottom-to-top so falling material moves once per step. Horizontal scan
    direction alternates every step to avoid a left/right bias.
-3. Each cell runs the rule for its phase:
+3. Each cell first updates its state, if it can change at all (room-temperature
+   sand and water skip this entirely):
+   - heat sources reset to their temperature; cells off ambient exchange heat
+     with their 4 neighbours, conserving the total;
+   - reactions with a neighbour, temperature transitions, lifetime countdown
+     and emission (fire throwing flames) may turn it into something else.
+4. Then it runs the movement rule for its phase:
    - **Powder** falls (accelerating up to 3 cells/step), else slides diagonally.
    - **Liquid** falls, slides diagonally, else flows sideways up to its
      `dispersion` distance, stopping early over drops. Each liquid cell keeps
      the direction it last flowed in (`velocity_x`) until blocked, so water
      surges and spreads like a current instead of jittering in place.
+   - **Gas** rises with its `rise_chance`, bubbles up through liquids, sorts
+     above denser gases and drifts sideways.
    - Movers displace lighter liquids/gases (sand sinks through water).
-4. Every move wakes the 3×3 neighbourhood of both cells, possibly in
+5. Every move wakes the 3×3 neighbourhood of both cells, possibly in
    neighbouring chunks. The wake goes into the current step's dirty rect (so a
    cell freed mid-step, like the one above a gap, still moves this step) and
    into the next step's. Cells that cannot move are not re-woken, so finished
    regions go to sleep.
 
-Chunking is purely an optimisation: a test checks that the chunked simulation
-produces exactly the same world as updating every cell every step.
+   Any temperature change wakes its 3×3 too, since a sleeping neighbour may now
+   have a gap worth exchanging. Cells that are still changing (burning,
+   cooling, reacting) keep themselves awake.
+
+Chunking is purely an optimisation: tests check that the chunked simulation
+produces exactly the same materials and temperatures as updating every cell
+every step, including with fire, lava, steam and ice.
+
+### Adding a material
+
+```cpp
+px::MaterialDef acid;
+acid.name = "acid";
+acid.phase = px::Phase::Liquid;
+acid.density = 1100;
+acid.color = {120, 220, 60};
+acid.dispersion = 6;
+registry.add(acid);
+registry.add_reaction("acid", "stone", "empty", "smoke", 0.05f);  // acid eats stone
+registry.finalize();
+```
+
+Only the first material named in a reaction looks for partners, so name the
+rarer or more active one first.
 
 A per-cell clock byte stops a cell that has already moved this step from being
 updated again.
@@ -125,10 +183,14 @@ Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
 
 | Metric | Value |
 | --- | --- |
-| Mean step | 4.5 ms |
-| p95 step | 7.2 ms |
+| Mean step | ~5.6 ms |
+| p95 step | ~10.5 ms |
 | Cells scanned per step | ~166k |
-| Memory | 6 bytes/cell (~24 KiB per chunk; 10M cells ≈ 60 MiB) |
+| Memory | 10 bytes/cell (~40 KiB per chunk; 10M cells ≈ 100 MiB) |
+
+`pixel_stress` also covers the app-sized world fully on fire (p95 7.4 ms) and
+lava raining into a lake (p95 6.8 ms). Timings vary run to run on shared
+machines by ±15%.
 
 ## Known limitations / next steps
 
@@ -139,7 +201,9 @@ Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
   well inside 16.7 ms). The planned path is a checkerboard chunk update (chunks in
   the same phase never touch each other's cells), which the order-independent
   RNG already supports.
+- Heat moves at most one neighbour per step, so it spreads ~15 cells through
+  stone in 10 seconds. Temperatures are whole degrees and a 1° gap does not
+  flow, so buried layers can settle a degree per layer above ambient.
+- Steam and smoke drift as scattered particles rather than billowing clouds.
 - The world is a fixed grid of chunks; streaming/infinite worlds come with
-  seeded world generation (roadmap step 3).
-- Roadmap step 2 next: temperature, fire, smoke, oil and a data-driven reaction
-  table (e.g. water + lava → stone + steam).
+  seeded world generation (roadmap step 3, next).

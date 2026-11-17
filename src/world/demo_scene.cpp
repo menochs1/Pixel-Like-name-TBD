@@ -62,6 +62,45 @@ void build_demo_scene(World& world, const BaseMaterials& ids) {
     const int py = h / 4 + i * 22;
     world.fill_rect(px, py, 36, 4, ids.stone);
   }
+
+  // Top of the ground terrain (scanning up from the bottom, so floating
+  // platforms and ledges are ignored).
+  auto ground_y = [&](int x) {
+    int y = h - 1;
+    while (y > 0 && world.get(x, y - 1) == ids.stone) --y;
+    return y;
+  };
+
+  // An oil pit dug into the ground, next to a wooden watchtower: light the oil
+  // (fire, key 6) and the tower catches.
+  const int ox0 = w * 9 / 20, ox1 = w * 11 / 20;
+  int pit_top = h;
+  for (int x = ox0; x <= ox1; ++x) pit_top = std::min(pit_top, ground_y(x));
+  for (int x = ox0 + 3; x <= ox1 - 3; ++x) {
+    for (int y = pit_top - 2; y < pit_top + 16; ++y) world.set(x, y, kEmpty);
+  }
+  world.fill_rect(ox0, pit_top - 4, 3, 22, ids.stone);
+  world.fill_rect(ox1 - 2, pit_top - 4, 3, 22, ids.stone);
+  world.fill_rect(ox0, pit_top + 16, ox1 - ox0 + 1, 3, ids.stone);
+  world.fill_rect(ox0 + 3, pit_top + 4, ox1 - ox0 - 5, 12, ids.oil);
+
+  const int tx0 = ox1 + 1, tx1 = tx0 + 34;
+  int tower_base = h;
+  for (int x = tx0; x <= tx1; ++x) tower_base = std::min(tower_base, ground_y(x));
+  for (int x = tx0; x <= tx1; x += 11) world.fill_rect(x, tower_base - 70, 3, 70, ids.wood);
+  // A plank laid over the pit into the tower: flames from the oil catch it and
+  // carry the fire across.
+  world.fill_rect(ox0 + 2, pit_top - 14, tx0 - ox0 - 2, 3, ids.wood);
+  world.fill_rect(tx0 - 3, tower_base - 74, tx1 - tx0 + 9, 4, ids.wood);
+  world.fill_rect(tx0, tower_base - 38, tx1 - tx0 + 3, 3, ids.wood);
+
+  // A lava pool in a stone crucible at the far right: drop water or ice in.
+  const int lv0 = w - 34, lv1 = w - 6;
+  const int lv_top = ground_y(lv0 + 14) - 2;
+  world.fill_rect(lv0, lv_top - 14, 3, 30, ids.stone);
+  world.fill_rect(lv1, lv_top - 14, 3, 30, ids.stone);
+  world.fill_rect(lv0, lv_top + 16, lv1 - lv0 + 3, 4, ids.stone);
+  world.fill_rect(lv0 + 3, lv_top - 2, lv1 - lv0 - 3, 18, ids.lava);
 }
 
 void build_rain_scene(World& world, const BaseMaterials& ids) {

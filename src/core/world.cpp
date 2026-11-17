@@ -23,11 +23,24 @@ void World::set(int x, int y, MaterialId material) {
   if (!in_bounds(x, y)) return;
   Chunk& c = chunk_for(x, y);
   const int i = local_index(x, y);
+  const MaterialProps& p = materials_->props(material);
   c.material[i] = material;
+  c.temperature[i] = p.spawn_temp;  // ambient unless the material defines one
+  c.life[i] = 0;
+  if (p.lifetime_max > 0) {
+    const std::uint32_t span = static_cast<std::uint32_t>(p.lifetime_max - p.lifetime_min) + 1;
+    c.life[i] = static_cast<std::uint16_t>(p.lifetime_min + cell_hash(seed_ ^ 0x11FE, x, y, tick_) % span);
+  }
   c.velocity_y[i] = 0;
   c.velocity_x[i] = 0;
   c.shade[i] = static_cast<std::uint8_t>(cell_hash(seed_, x, y, 0) & 0x0F);
   c.clock[i] = 0;
+  wake(x, y);
+}
+
+void World::set_temperature(int x, int y, Temperature t) {
+  if (!in_bounds(x, y)) return;
+  chunk_for(x, y).temperature[local_index(x, y)] = t;
   wake(x, y);
 }
 

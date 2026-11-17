@@ -4,7 +4,9 @@
 //   Left mouse     paint the selected material
 //   Right mouse    erase
 //   Mouse wheel    brush size
-//   1 / 2 / 3      select sand / water / stone
+//   1 sand   2 water   3 stone   4 oil   5 wood
+//   6 fire   7 lava    8 ice     9 steam 0 smoke
+//   T              toggle heat view (temperature map)
 //   Space          pause / resume
 //   . (period)     single step while paused
 //   R              rebuild the demo scene
@@ -46,7 +48,9 @@ struct Brush {
 
 float coverage_for(const px::MaterialRegistry& reg, px::MaterialId m) {
   const px::Phase p = reg.phase(m);
-  return (p == px::Phase::Powder || p == px::Phase::Liquid) ? 0.55f : 1.0f;
+  if (p == px::Phase::Powder || p == px::Phase::Liquid) return 0.55f;
+  if (p == px::Phase::Gas) return 0.4f;
+  return 1.0f;
 }
 
 void paint_line(px::World& world, int x0, int y0, int x1, int y1, int radius, px::MaterialId m, float coverage) {
@@ -121,6 +125,7 @@ int main(int argc, char** argv) {
   bool paused = false;
   bool single_step = false;
   bool show_dirty = false;
+  bool show_heat = false;
 
   // Painting is driven by mouse events, not by polling the button once per
   // frame: a click shorter than a frame still paints, and a fast drag paints
@@ -173,6 +178,14 @@ int main(int argc, char** argv) {
             case SDLK_1: brush.material = ids.sand; break;
             case SDLK_2: brush.material = ids.water; break;
             case SDLK_3: brush.material = ids.stone; break;
+            case SDLK_4: brush.material = ids.oil; break;
+            case SDLK_5: brush.material = ids.wood; break;
+            case SDLK_6: brush.material = ids.fire; break;
+            case SDLK_7: brush.material = ids.lava; break;
+            case SDLK_8: brush.material = ids.ice; break;
+            case SDLK_9: brush.material = ids.steam; break;
+            case SDLK_0: brush.material = ids.smoke; break;
+            case SDLK_t: show_heat = !show_heat; break;
             case SDLK_r: px::build_demo_scene(world, ids); break;
             case SDLK_c: world.clear(); break;
             case SDLK_d: show_dirty = !show_dirty; break;
@@ -228,7 +241,8 @@ int main(int argc, char** argv) {
       if (!paused) accumulator -= kStepSeconds;
     }
 
-    renderer.render(world, pixels.data(), w);
+    if (show_heat) renderer.render_temperature(world, pixels.data(), w);
+    else renderer.render(world, pixels.data(), w);
     if (show_dirty) renderer.draw_dirty_rects(world, pixels.data(), w);
     draw_brush_outline(pixels.data(), w, h, mx, my, brush.radius);
     SDL_UpdateTexture(texture, nullptr, pixels.data(), w * static_cast<int>(sizeof(std::uint32_t)));
@@ -241,10 +255,11 @@ int main(int argc, char** argv) {
     if (title_timer >= 0.5) {
       char title[256];
       std::snprintf(title, sizeof(title),
-                    "Pixel Sandbox | %s | brush %d | %.0f fps | sim %.2f ms | active chunks %d/%d%s",
+                    "Pixel Sandbox | %s | brush %d | %.0f fps | sim %.2f ms | active chunks %d/%d%s%s",
                     materials.def(brush.material).name.c_str(), brush.radius, frames / title_timer,
                     sim_steps ? sim_ms_sum / sim_steps : 0.0, last_stats.active_chunks,
-                    world.width_chunks() * world.height_chunks(), paused ? " | PAUSED" : "");
+                    world.width_chunks() * world.height_chunks(), show_heat ? " | HEAT VIEW" : "",
+                    paused ? " | PAUSED" : "");
       SDL_SetWindowTitle(window, title);
       title_timer = 0.0;
       sim_ms_sum = 0.0;
