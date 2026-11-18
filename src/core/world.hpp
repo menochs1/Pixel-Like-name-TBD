@@ -77,6 +77,8 @@ class World {
 
   /// Marks (x, y) and its 8 neighbours for update on the next step.
   void wake(int x, int y);
+  /// Marks the (2r+1)x(2r+1) box around (x, y), like wake() with a larger radius.
+  void wake_area(int x, int y, int r);
   void wake_all();
   /// Marks just (x, y) for update this step (if not yet passed) and next step.
   void wake_cell(int x, int y) {

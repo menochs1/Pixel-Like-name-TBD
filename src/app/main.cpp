@@ -59,7 +59,14 @@ constexpr int kViewH = 360;
 constexpr double kCameraSpeed = 420.0;  // cells per second (x3 with Shift)
 constexpr int kWindowScale = 2;
 constexpr double kStepSeconds = 1.0 / 60.0;
-constexpr int kMaxStepsPerFrame = 4;  // avoid a spiral of death if the sim falls behind
+constexpr int kMaxStepsPerFrame = 2;
+// Simulation time allowed per frame before the rest of the backlog is dropped.
+// On a slow machine the game then runs in slow motion at a steady frame rate,
+// instead of trying to catch up, taking even longer, and stuttering.
+constexpr double kSimBudgetMs = 10.0;
+// Chunks beyond the view that keep simulating; everything further away is
+// paused (and resumes when the camera comes back), like Noita.
+constexpr int kSimMarginChunks = 2;
 
 struct Brush {
   px::MaterialId material = px::kEmpty;
@@ -338,17 +345,33 @@ int main(int argc, char** argv) {
       stroke_to(mx, my, (buttons & SDL_BUTTON_LMASK) == 0);
     }
 
-    // Fixed-timestep simulation.
+    // Fixed-timestep simulation, limited to the chunks around the camera.
+    px::ChunkRegion region;
+    if (demo) {
+      region = {0, 0, world.width_chunks() - 1, world.height_chunks() - 1};
+    } else {
+      region.cx0 = (cam_ix() >> px::kChunkShift) - kSimMarginChunks;
+      region.cy0 = (cam_iy() >> px::kChunkShift) - kSimMarginChunks;
+      region.cx1 = ((cam_ix() + w - 1) >> px::kChunkShift) + kSimMarginChunks;
+      region.cy1 = ((cam_iy() + h - 1) >> px::kChunkShift) + kSimMarginChunks;
+    }
     accumulator = std::min(accumulator + dt, kStepSeconds * kMaxStepsPerFrame);
     if (paused) accumulator = 0.0;
     int steps = paused ? (single_step ? 1 : 0) : static_cast<int>(accumulator / kStepSeconds);
     single_step = false;
+    double frame_sim_ms = 0.0;
     for (int s = 0; s < steps; ++s) {
       const auto t0 = clock::now();
-      last_stats = px::step(world);
-      sim_ms_sum += std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+      last_stats = px::step(world, region);
+      const double step_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+      sim_ms_sum += step_ms;
+      frame_sim_ms += step_ms;
       ++sim_steps;
       if (!paused) accumulator -= kStepSeconds;
+      if (frame_sim_ms > kSimBudgetMs) {
+        accumulator = std::min(accumulator, kStepSeconds * 0.5);  // drop the backlog: slow motion
+        break;
+      }
     }
 
     const px::Viewport view{cam_ix(), cam_iy(), w, h};

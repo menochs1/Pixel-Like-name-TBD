@@ -617,3 +617,73 @@ TEST(chunk_sleeping_matches_updating_everything_on_a_wrapping_world) {
   }
   CHECK(identical);
 }
+
+// ------------------------------------------------------------------ region-limited stepping
+
+TEST(chunks_outside_the_region_pause_and_resume) {
+  Fixture f;
+  px::World w(4, 2, f.materials, 31);
+  w.set(10, 0, f.ids.sand);   // chunk (0, 0): inside the region
+  w.set(200, 0, f.ids.sand);  // chunk (3, 0): outside
+  const px::ChunkRegion near{0, 0, 1, 1};
+  int paused = 0;
+  for (int s = 0; s < 300; ++s) paused = px::step(w, near).paused_chunks;
+  CHECK_EQ(w.get(10, w.height() - 1), f.ids.sand);  // fell all the way
+  CHECK_EQ(w.get(200, 0), f.ids.sand);               // frozen in place, not lost
+  CHECK(paused >= 1);
+  for (int s = 0; s < 300; ++s) px::step(w);  // camera comes back: it resumes
+  CHECK_EQ(w.get(200, w.height() - 1), f.ids.sand);
+}
+
+TEST(material_crossing_into_a_paused_chunk_waits_there) {
+  Fixture f;
+  px::World w(1, 3, f.materials, 33);
+  w.set(20, 60, f.ids.sand);  // falls from chunk row 0 into paused row 1
+  const px::ChunkRegion top{0, 0, 0, 0};
+  for (int s = 0; s < 200; ++s) px::step(w, top);
+  int found_y = -1;
+  for (int y = 0; y < w.height(); ++y)
+    if (w.get(20, y) == f.ids.sand) found_y = y;
+  CHECK(found_y >= 64 && found_y < 128);  // entered the paused chunk and stopped
+  CHECK_EQ(w.count(f.ids.sand), std::size_t{1});
+  for (int s = 0; s < 300; ++s) px::step(w);
+  CHECK_EQ(w.get(20, w.height() - 1), f.ids.sand);
+}
+
+TEST(region_wraps_across_the_seam) {
+  Fixture f;
+  px::World w(4, 1, f.materials, 35, px::EdgeX::Wrap);
+  w.set(250, 0, f.ids.sand);  // last chunk column
+  w.set(130, 0, f.ids.sand);  // chunk column 2, outside
+  const px::ChunkRegion seam{-1, 0, 0, 0};  // columns 3 and 0
+  for (int s = 0; s < 200; ++s) px::step(w, seam);
+  CHECK_EQ(w.get(250, 63), f.ids.sand);
+  CHECK_EQ(w.get(130, 0), f.ids.sand);
+}
+
+TEST(a_region_covering_everything_matches_plain_step) {
+  Fixture f;
+  auto build = [&](px::World& w) {
+    w.fill_rect(0, 100, 256, 28, f.ids.stone);
+    w.fill_rect(20, 10, 60, 40, f.ids.water);
+    w.fill_rect(120, 10, 30, 30, f.ids.sand);
+    w.fill_rect(180, 80, 10, 10, f.ids.lava);
+    w.fill_rect(200, 70, 20, 30, f.ids.wood);
+  };
+  px::World a(4, 2, f.materials, 37), b(4, 2, f.materials, 37);
+  build(a);
+  build(b);
+  const px::ChunkRegion all{0, 0, 3, 1};
+  bool same = true;
+  for (int s = 0; s < 400 && same; ++s) {
+    px::step(a);
+    px::step(b, all);
+    for (int y = 0; y < a.height() && same; ++y)
+      for (int x = 0; x < a.width(); ++x)
+        if (a.get(x, y) != b.get(x, y) || a.temperature(x, y) != b.temperature(x, y)) {
+          same = false;
+          break;
+        }
+  }
+  CHECK(same);
+}

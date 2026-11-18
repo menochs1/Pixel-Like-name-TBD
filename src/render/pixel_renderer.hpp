@@ -40,6 +40,10 @@ class PixelRenderer {
   static constexpr int kShades = 16;
   std::vector<std::array<std::uint32_t, kShades>> palette_;
   std::vector<std::uint8_t> flicker_;  // per material
+  // Heat-view colour per temperature, precomputed: interpolating the colour
+  // ramp per pixel made the heat view ~5x slower to draw than the normal view.
+  static constexpr int kHeatLutMin = -300, kHeatLutMax = 2000;
+  std::vector<std::uint32_t> heat_lut_;
 };
 
 }  // namespace px

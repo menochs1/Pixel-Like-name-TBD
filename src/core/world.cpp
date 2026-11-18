@@ -1,5 +1,6 @@
 #include "core/world.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "core/rng.hpp"
@@ -93,6 +94,40 @@ void World::wake(int x, int y) {
       c.dirty.include(nx & kChunkMask, ny & kChunkMask);
       c.next_dirty.include(nx & kChunkMask, ny & kChunkMask);
     }
+  }
+}
+
+void World::wake_area(int x, int y, int r) {
+  const int lx = x & kChunkMask;
+  const int ly = y & kChunkMask;
+  if (lx >= r && lx < kChunkSize - r && ly >= r && ly < kChunkSize - r && in_bounds(x, y)) {
+    Chunk& c = chunk_for(x, y);
+    c.dirty.include_rect(lx - r, ly - r, lx + r, ly + r);
+    c.next_dirty.include_rect(lx - r, ly - r, lx + r, ly + r);
+    return;
+  }
+  // The box crosses a chunk edge: split it into one rect per chunk touched.
+  const int y0 = std::max(y - r, 0), y1 = std::min(y + r, height_ - 1);
+  for (int sy = y0; sy <= y1;) {
+    const int ey = std::min(y1, sy | kChunkMask);  // last row in this chunk row
+    for (int sx = x - r; sx <= x + r;) {
+      const int ex = std::min(x + r, sx | kChunkMask);  // last column in this chunk
+      if (wrap_x_ || (sx >= 0 && ex < width_)) {
+        Chunk& c = chunk_for(sx, sy);
+        c.dirty.include_rect(sx & kChunkMask, sy & kChunkMask, ex & kChunkMask, ey & kChunkMask);
+        c.next_dirty.include_rect(sx & kChunkMask, sy & kChunkMask, ex & kChunkMask, ey & kChunkMask);
+      } else {
+        // Walled world: clip to the columns that exist.
+        const int cx0 = std::max(sx, 0), cx1 = std::min(ex, width_ - 1);
+        if (cx0 <= cx1) {
+          Chunk& c = chunk_for(cx0, sy);
+          c.dirty.include_rect(cx0 & kChunkMask, sy & kChunkMask, cx1 & kChunkMask, ey & kChunkMask);
+          c.next_dirty.include_rect(cx0 & kChunkMask, sy & kChunkMask, cx1 & kChunkMask, ey & kChunkMask);
+        }
+      }
+      sx = ex + 1;
+    }
+    sy = ey + 1;
   }
 }
 

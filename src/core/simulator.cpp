@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <vector>
 
 #include "core/rng.hpp"
 
@@ -14,7 +15,11 @@ constexpr int kMaxFallSpeed = 8;  // velocity units; fall distance per step is 1
 // update_liquid). The count is stored as a negative velocity_y, so it must fit
 // in an int8; each reversal counts with probability 1/2 to double its reach.
 constexpr int kSettleCount = 120;
-constexpr float kHeatRate = 0.125f;  // fraction of a temperature gap closed per neighbour pair per step
+// Fraction of a temperature gap closed per neighbour pair per exchange. Heat is
+// exchanged on a checkerboard (see heat_turn), so each pair exchanges once per
+// step; exchanging from both sides every step cost twice as much for the same
+// diffusion.
+constexpr float kHeatRate = 0.25f;
 constexpr int kMinTemp = -273;
 constexpr int kMaxTemp = 30000;
 
@@ -111,38 +116,62 @@ void transform(StepContext& ctx, int x, int y, MaterialId to, std::uint16_t life
 ///
 /// A material with conductivity 0 is a perfect insulator: no heat crosses into
 /// or out of it (basalt sealing a buried lava chamber).
+/// Cells exchange heat on alternating checkerboard squares: every neighbour
+/// pair has one cell of each colour, so each pair exchanges exactly once per
+/// step. World widths are whole chunks (even), so the pattern also holds
+/// across the seam of a wrapping world.
+bool heat_turn(const StepContext& ctx, int x, int y) {
+  return ((static_cast<unsigned>(x) + static_cast<unsigned>(y) + ctx.tick) & 1U) == 0;
+}
+
 bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
   if (conductivity <= 0.0f) return false;
   World& w = ctx.world;
   Chunk& c = w.chunk_for(x, y);
-  const int i = World::local_index(x, y);
+  const int lx = x & kChunkMask, ly = y & kChunkMask;
+  const int i = Chunk::index(lx, ly);
   int t = c.temperature[i];
   bool flowed = false;
-  static constexpr int kDx[4] = {1, -1, 0, 0};
-  static constexpr int kDy[4] = {0, 0, 1, -1};
-  for (int k = 0; k < 4; ++k) {
-    const int nx = x + kDx[k], ny = y + kDy[k];
-    if (!w.in_bounds(nx, ny)) continue;
-    Chunk& nc = w.chunk_for(nx, ny);
-    const int ni = World::local_index(nx, ny);
+
+  auto pair = [&](Chunk& nc, int ni) {
     const int tn = nc.temperature[ni];
-    if (tn == t) continue;
+    if (tn == t) return;
     const float nk = ctx.materials.props(nc.material[ni]).conductivity;
-    if (nk <= 0.0f) continue;  // insulator
+    if (nk <= 0.0f) return;  // insulator
     const float kc = (conductivity + nk) * 0.5f * kHeatRate;
     int delta = static_cast<int>(static_cast<float>(tn - t) * kc);  // truncates toward zero
     // Let small gaps still close by a degree, otherwise cells stall a few
     // degrees off their neighbours forever. A gap of 1 is left alone (moving
     // it would just swap the two values back and forth).
     if (delta == 0 && (tn - t >= 2 || tn - t <= -2)) delta = tn > t ? 1 : -1;
-    if (delta == 0) continue;
+    if (delta == 0) return;
     t += delta;
     nc.temperature[ni] = static_cast<Temperature>(std::clamp(tn - delta, kMinTemp, kMaxTemp));
-    w.wake(nx, ny);
     flowed = true;
+  };
+
+  // Neighbour order is fixed (+x, -x, +y, -y) so both paths give identical results.
+  if (lx > 0 && lx < kChunkMask && ly > 0 && ly < kChunkMask) {
+    // All four neighbours in this chunk: plain index offsets, no coordinate
+    // wrapping or chunk lookups (~95% of cells).
+    pair(c, i + 1);
+    pair(c, i - 1);
+    pair(c, i + kChunkSize);
+    pair(c, i - kChunkSize);
+  } else {
+    static constexpr int kDx[4] = {1, -1, 0, 0};
+    static constexpr int kDy[4] = {0, 0, 1, -1};
+    for (int k = 0; k < 4; ++k) {
+      const int nx = x + kDx[k], ny = y + kDy[k];
+      if (!w.in_bounds(nx, ny)) continue;
+      pair(w.chunk_for(nx, ny), World::local_index(nx, ny));
+    }
   }
   c.temperature[i] = static_cast<Temperature>(std::clamp(t, kMinTemp, kMaxTemp));
-  if (flowed) w.wake(x, y);
+  // One 5x5 wake covers the 3x3 around this cell and around every neighbour
+  // whose temperature changed; waking each separately cost up to 5 wakes per
+  // cell and was the largest single cost in hot scenes.
+  if (flowed) w.wake_area(x, y, 2);
   return flowed;
 }
 
@@ -150,12 +179,12 @@ bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
 void update_air(StepContext& ctx, int x, int y) {
   Chunk& c = ctx.world.chunk_for(x, y);
   const int i = World::local_index(x, y);
-  exchange_heat(ctx, x, y, ctx.materials.props(kEmpty).conductivity);
+  const bool flowed = heat_turn(ctx, x, y) && exchange_heat(ctx, x, y, ctx.materials.props(kEmpty).conductivity);
   const int t = c.temperature[i];
   int relax = (kAmbient - t) / 8;
   if (relax == 0) relax = (t > kAmbient) ? -1 : (t < kAmbient ? 1 : 0);
   c.temperature[i] = static_cast<Temperature>(t + relax);
-  if (relax != 0) ctx.world.wake(x, y);
+  if (relax != 0 && !flowed) ctx.world.wake(x, y);  // a heat flow already woke the 5x5
 }
 
 // ------------------------------------------------------------------ movement
@@ -357,7 +386,12 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
     c.temperature[i] = p.spawn_temp;
     ctx.world.wake(x, y);
   }
-  if (c.temperature[i] != kAmbient && exchange_heat(ctx, x, y, p.conductivity)) keep_awake = true;
+  // Off-turn cells need not stay awake for heat: any temperature change wakes
+  // the 3x3 (or 5x5) around it, so the neighbour whose turn comes next is awake
+  // and handles the pair.
+  if (c.temperature[i] != kAmbient && heat_turn(ctx, x, y) && exchange_heat(ctx, x, y, p.conductivity)) {
+    keep_awake = true;
+  }
 
   // Contact reactions.
   if (p.has_reactions) {
@@ -456,7 +490,9 @@ void update_cell(StepContext& ctx, int x, int y) {
 
 }  // namespace
 
-StepStats step(World& world) {
+namespace {
+
+StepStats step_impl(World& world, const ChunkRegion* region) {
   StepStats stats;
   world.advance_tick();
   const std::uint32_t tick = world.tick();
@@ -464,9 +500,37 @@ StepStats step(World& world) {
 
   const int wc = world.width_chunks();
   const int hc = world.height_chunks();
+
+  // Which chunks run this step (all of them without a region).
+  std::vector<std::uint8_t> active;
+  if (region) {
+    active.assign(static_cast<std::size_t>(wc) * static_cast<std::size_t>(hc), 0);
+    const int y0 = std::max(region->cy0, 0), y1 = std::min(region->cy1, hc - 1);
+    int x0 = region->cx0, x1 = region->cx1;
+    if (!world.wraps_x()) {
+      x0 = std::max(x0, 0);
+      x1 = std::min(x1, wc - 1);
+    } else if (x1 - x0 + 1 >= wc) {
+      x0 = 0;
+      x1 = wc - 1;
+    }
+    for (int cy = y0; cy <= y1; ++cy) {
+      for (int cx = x0; cx <= x1; ++cx) {
+        const int wx = ((cx % wc) + wc) % wc;
+        active[static_cast<std::size_t>(cy * wc + wx)] = 1;
+      }
+    }
+  }
+
   for (int cy = 0; cy < hc; ++cy) {
     for (int cx = 0; cx < wc; ++cx) {
       Chunk& c = world.chunk(cx, cy);
+      if (region && !active[static_cast<std::size_t>(cy * wc + cx)]) {
+        // Paused: keep the pending work for when the region comes back.
+        c.dirty.reset();
+        stats.paused_chunks += c.next_dirty.empty() ? 0 : 1;
+        continue;
+      }
       c.dirty = c.next_dirty;
       c.next_dirty.reset();
     }
@@ -501,5 +565,11 @@ StepStats step(World& world) {
   }
   return stats;
 }
+
+}  // namespace
+
+StepStats step(World& world) { return step_impl(world, nullptr); }
+
+StepStats step(World& world, const ChunkRegion& region) { return step_impl(world, &region); }
 
 }  // namespace px

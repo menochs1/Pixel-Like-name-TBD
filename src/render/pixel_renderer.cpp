@@ -15,7 +15,13 @@ std::uint32_t argb(int r, int g, int b) {
 
 }  // namespace
 
+namespace {
+std::uint32_t heat_color(int t);
+}  // namespace
+
 PixelRenderer::PixelRenderer(const MaterialRegistry& materials) {
+  heat_lut_.resize(static_cast<std::size_t>(kHeatLutMax - kHeatLutMin + 1));
+  for (int t = kHeatLutMin; t <= kHeatLutMax; ++t) heat_lut_[static_cast<std::size_t>(t - kHeatLutMin)] = heat_color(t);
   palette_.resize(materials.size());
   flicker_.resize(materials.size());
   for (std::size_t id = 0; id < materials.size(); ++id) {
@@ -137,7 +143,8 @@ void PixelRenderer::render_temperature(const World& world, std::uint32_t* pixels
       const Chunk& c = world.chunk_for(wx, wy);
       const int base = World::local_index(wx, wy);
       for (int k = 0; k < n; ++k) {
-        std::uint32_t col = heat_color(c.temperature[base + k]);
+        const int t = std::clamp<int>(c.temperature[base + k], kHeatLutMin, kHeatLutMax);
+        std::uint32_t col = heat_lut_[static_cast<std::size_t>(t - kHeatLutMin)];
         if (c.material[base + k] != kEmpty) col |= 0x00202020U;  // lift solids/fluids a little
         row[sx + k] = col;
       }

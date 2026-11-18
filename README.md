@@ -59,11 +59,12 @@ world generation and a world that wraps around:
 
 ## Download (Windows)
 
-A prebuilt 64-bit Windows build is in
-[`releases/PixelSandbox-win64.zip`](releases/PixelSandbox-win64.zip). Download
-it, right-click → **Extract All**, then run `pixel_sandbox.exe` (keep
-`SDL2.dll` beside it). Windows SmartScreen may warn because the exe is
-unsigned: choose **More info → Run anyway**.
+Prebuilt 64-bit Windows builds are attached to the
+[GitHub Releases](https://github.com/menochs1/Pixel-Like-name-TBD/releases)
+page (`PixelSandbox-win64.zip`); compiled builds are not kept in the
+repository. Download the zip, right-click → **Extract All**, then run
+`pixel_sandbox.exe` (keep `SDL2.dll` beside it). Windows SmartScreen may warn
+because the exe is unsigned: choose **More info → Run anyway**.
 
 ## Building
 
@@ -262,22 +263,47 @@ Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
 
 | Metric | Value |
 | --- | --- |
-| Mean step | ~5.6 ms |
-| p95 step | ~10.5 ms |
+| Mean step | ~5.0 ms |
+| p95 step | ~8 ms |
 | Cells scanned per step | ~166k |
 | Memory | 10 bytes/cell (~40 KiB per chunk; 10M cells ≈ 100 MiB) |
 
-`pixel_stress` also covers the app-sized world fully on fire (p95 7.4 ms) and
-lava raining into a lake (p95 6.8 ms). Timings vary run to run on shared
-machines by ±15%.
+`pixel_stress` also covers a small world fully on fire (p95 3.5 ms) and lava
+raining into a lake (p95 3.1 ms). Timings vary run to run on shared machines by
+±15%.
+
+### Slower machines
+
+The app keeps its cost bounded so it stays playable on low-end laptops:
+
+- **Only the area around the camera is simulated**: the view plus a 2-chunk
+  margin (~165 of the 1536 chunks). Everything further away is paused, keeping
+  its pending work, and resumes when the camera returns (`step(world, region)`).
+  Activity off screen used to cost as much as activity on screen.
+- **No catch-up spiral**: at most 2 steps per frame and 10 ms of simulation per
+  frame. When a machine cannot keep up, the backlog is dropped and the game runs
+  in slow motion at a steady frame rate, instead of running up to 4 steps a
+  frame, falling further behind and stuttering.
+- **Heat is cheaper**: cells exchange heat on a checkerboard (each neighbour pair
+  once per step instead of from both sides), neighbours inside a chunk are read
+  by index offset, and one 5×5 wake replaces up to five 3×3 wakes.
+- **Heat view** colours come from a lookup table (7× faster to draw).
+
+Measured with a scripted heavy painting session (fire, oil, lava, water, sand
+and steam dragged across the whole view for 50 s) on a 2.1 GHz server core:
+
+| Build | Before | After |
+| --- | --- | --- |
+| Release | 12 fps avg, 6 min | 50 fps avg, 37 min |
+| Sanitizer build (stand-in for a ~5–8× slower CPU) | 3 fps avg, 1 min | 13 fps avg, 7 min |
 
 ## Known limitations / next steps
 
 - Single-threaded. A 10-million-cell world with ~3M cells moving at once takes
-  ~115 ms per step (the app's 512×320 world and the 2048×1152 benchmark stay
-  well inside 16.7 ms). The planned path is a checkerboard chunk update (chunks in
-  the same phase never touch each other's cells), which the order-independent
-  RNG already supports.
+  ~120 ms per step; the app avoids this by simulating only around the camera.
+  Multithreading is the next big performance step for heavy scenes in view; it
+  has to keep the world-wide bottom-to-top row order that stops liquids
+  terracing at chunk edges.
 - Heat moves at most one neighbour per step, so it spreads ~15 cells through
   stone in 10 seconds. Temperatures are whole degrees and a 1° gap does not
   flow, so buried layers can settle a degree per layer above ambient.
