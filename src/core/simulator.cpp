@@ -9,6 +9,11 @@ namespace px {
 namespace {
 
 constexpr int kMaxFallSpeed = 8;  // velocity units; fall distance per step is 1 + v / 3
+// A liquid whose sideways flow has reversed about 2 * kSettleCount times without
+// it dropping is "settled": it stops wandering across a flat surface (see
+// update_liquid). The count is stored as a negative velocity_y, so it must fit
+// in an int8; each reversal counts with probability 1/2 to double its reach.
+constexpr int kSettleCount = 120;
 constexpr float kHeatRate = 0.125f;  // fraction of a temperature gap closed per neighbour pair per step
 constexpr int kMinTemp = -273;
 constexpr int kMaxTemp = 30000;
@@ -161,7 +166,7 @@ void set_flow(World& w, int x, int y, int d) {
 /// Free fall through empty space or gas is a single swap to the landing cell;
 /// sinking into a lighter liquid moves only one cell per step.
 int fall(StepContext& ctx, int x, int y, MaterialId m, int velocity) {
-  int v = std::min(velocity + 1, kMaxFallSpeed);
+  int v = std::min(std::max(velocity, 0) + 1, kMaxFallSpeed);
   const int max_cells = 1 + v / 3;
   int dist = 0;
   MaterialId below = ctx.world.get(x, y + 1);
@@ -174,7 +179,7 @@ int fall(StepContext& ctx, int x, int y, MaterialId m, int velocity) {
     v = std::min(v, 2);
   }
   if (dist == 0) {
-    set_velocity(ctx.world, x, y, 0);
+    if (velocity > 0) set_velocity(ctx.world, x, y, 0);  // negative = a resting liquid's settle count; keep it
     return y;
   }
   swap_cells(ctx, x, y, x, y + dist);
@@ -203,6 +208,17 @@ bool update_powder(StepContext& ctx, int x, int y, MaterialId m, int velocity, R
 /// and keep going that way until blocked, like a current. Choosing a random
 /// side every step instead turns flow into a random walk: water creeps and
 /// jitters rather than rushing out and levelling.
+///
+/// Settling: a cell on top of a full liquid layer always has room beside it, so
+/// a partial top layer would shuffle sideways forever and never sleep. Each time
+/// a cell's sideways flow reverses without heading for a drop, it counts up (as a
+/// negative velocity_y); falling, sliding down or flowing towards a drop resets
+/// it. Only reversals count: a cell crossing a long, slightly higher terrace
+/// keeps its heading until it finds the edge, while one in a partial top layer
+/// bounces back and forth. Counting every move instead freezes a lake as a gentle
+/// staircase. Once settled, the cell only steps sideways into an adjacent drop or
+/// lighter liquid, so a level surface goes still while a breached container
+/// still drains.
 bool update_liquid(StepContext& ctx, int x, int y, MaterialId m, int velocity, Rng& rng) {
   const int prev = ctx.world.chunk_for(x, y).velocity_x[World::local_index(x, y)];
   const int first = prev != 0 ? prev : rng.direction();
@@ -210,25 +226,39 @@ bool update_liquid(StepContext& ctx, int x, int y, MaterialId m, int velocity, R
   if (fall(ctx, x, y, m, velocity) != y) return true;  // velocity_x travelled with the cell
   if (const int d = slide_diagonal(ctx, x, y, m, first); d != 0) {
     set_flow(ctx.world, x + d, y + 1, d);
+    set_velocity(ctx.world, x + d, y + 1, 0);  // it went down: no longer settling
     return true;
   }
 
   // Flow sideways up to `dispersion` cells, stopping early over a drop so the
   // liquid pours into holes instead of skipping across them.
-  const int dispersion = ctx.materials.dispersion(m);
+  const int settle = velocity < 0 ? -velocity : 0;
+  const bool settled = settle >= kSettleCount;
+  // A settled cell looks only at its direct neighbours: anything further out is
+  // beyond the 3x3 wake, so a change there would not wake it, and chunked
+  // simulation would drift from updating every cell.
+  const int dispersion = settled ? 1 : ctx.materials.dispersion(m);
   for (int d : {first, -first}) {
     int reach = 0;
+    bool purposeful = false;  // heading for a drop or under a lighter liquid
     for (int k = 1; k <= dispersion; ++k) {
       const int nx = x + d * k;
       const MaterialId target = ctx.world.get(nx, y);
       if (!can_displace(ctx.materials, m, target)) break;
       reach = k;
-      if (ctx.materials.phase(target) == Phase::Liquid) break;
-      if (can_displace(ctx.materials, m, ctx.world.get(nx, y + 1))) break;
+      if (ctx.materials.phase(target) == Phase::Liquid ||
+          can_displace(ctx.materials, m, ctx.world.get(nx, y + 1))) {
+        purposeful = true;
+        break;
+      }
     }
-    if (reach > 0) {
+    if (reach > 0 && (purposeful || !settled)) {
       swap_cells(ctx, x, y, x + d * reach, y);
       set_flow(ctx.world, x + d * reach, y, d);
+      int count = settle;
+      if (purposeful) count = 0;
+      else if (d != prev && (rng.next() & 1U)) count = std::min(settle + 1, kSettleCount);
+      set_velocity(ctx.world, x + d * reach, y, -count);
       return true;
     }
   }

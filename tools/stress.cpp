@@ -61,7 +61,7 @@ bool cells_valid(const px::World& w) {
       const px::Chunk& c = w.chunk(cx, cy);
       for (int i = 0; i < px::kChunkArea; ++i) {
         if (c.material[i] >= reg.size()) return false;
-        if (c.velocity_y[i] < 0 || c.velocity_y[i] > 8) return false;
+        if (c.velocity_y[i] < -120 || c.velocity_y[i] > 8) return false;  // negative: liquid settle count
         if (c.velocity_x[i] < -1 || c.velocity_x[i] > 1) return false;
         if (c.shade[i] > 15) return false;
         if (c.temperature[i] < -273 || c.temperature[i] > 2000) return false;
@@ -163,8 +163,17 @@ int main(int argc, char** argv) {
   std::printf("\nEditing fuzz: %d random operations on the app-sized world\n", ops);
   {
     px::World w(8, 5, reg, 0xC0FFEE);
-    px::build_demo_scene(w, ids);
     const px::MaterialId palette[] = {px::kEmpty, ids.stone, ids.sand, ids.water};
+    // The demo scene has lava, oil, wood and ice, whose reactions legitimately
+    // change material counts. Keep only what this fuzz paints with, so any
+    // change in counts is a real conservation bug.
+    auto build_inert_demo = [&] {
+      px::build_demo_scene(w, ids);
+      for (int y = 0; y < w.height(); ++y)
+        for (int x = 0; x < w.width(); ++x)
+          if (std::find(std::begin(palette), std::end(palette), w.get(x, y)) == std::end(palette)) w.set(x, y, px::kEmpty);
+    };
+    build_inert_demo();
     std::uint32_t seed = 12345;
     auto rnd = [&](int n) {
       seed = px::hash32(seed + 0x9E3779B9U);
@@ -177,7 +186,7 @@ int main(int argc, char** argv) {
       if (kind < 1) {
         w.clear();
       } else if (kind < 2) {
-        px::build_demo_scene(w, ids);
+        build_inert_demo();
       } else if (kind < 70) {
         // Brush stroke, deliberately reaching well outside the world.
         const int x = rnd(w.width() + 400) - 200;

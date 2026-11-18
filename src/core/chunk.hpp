@@ -44,7 +44,7 @@ struct Chunk {
   std::array<MaterialId, kChunkArea> material{};
   std::array<Temperature, kChunkArea> temperature{};  // degrees Celsius
   std::array<std::uint16_t, kChunkArea> life{};       // remaining steps; 0 = unlimited
-  std::array<std::int8_t, kChunkArea> velocity_y{};   // cells/step falling speed
+  std::array<std::int8_t, kChunkArea> velocity_y{};   // falling speed; resting liquids: -(sideways steps without dropping)
   std::array<std::int8_t, kChunkArea> velocity_x{};   // liquids: -1/0/+1 flow direction
   std::array<std::uint8_t, kChunkArea> shade{};       // 0..15 colour variant
   std::array<std::uint8_t, kChunkArea> clock{};       // last step this cell moved/updated

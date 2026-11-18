@@ -146,6 +146,39 @@ TEST(water_levels_out_in_a_basin) {
   CHECK_EQ(w.count(f.ids.water), std::size_t{40 * 64});
 }
 
+// A basin whose water does not fill a whole number of rows leaves a partial
+// top layer. Those surface cells have nowhere lower to go, so they must stop
+// shuffling sideways and let the basin sleep.
+TEST(partial_liquid_surface_goes_to_sleep) {
+  Fixture f;
+  px::World w(2, 1, f.materials, 17);
+  w.fill_rect(0, 0, 128, 1, f.ids.stone);  // lid: nothing falls in from outside
+  w.fill_rect(0, 30, 70, 34, f.ids.water);  // 2380 cells: 18 full rows + 76 over a 128-wide floor
+  const int steps = run_until_settled(w, 6000);
+  CHECK(steps < 6000);
+  CHECK_EQ(w.active_chunk_count(), 0);
+  CHECK_EQ(w.count(f.ids.water), std::size_t{70 * 34});
+  // Settling must not leave holes: every row below the surface layer is full.
+  for (int y = w.height() - 18; y < w.height(); ++y)
+    for (int x = 0; x < w.width(); ++x) CHECK_EQ(w.get(x, y), f.ids.water);
+}
+
+// A settled liquid must still react when its container opens up.
+TEST(settled_liquid_pours_when_its_wall_is_removed) {
+  Fixture f;
+  px::World w(2, 1, f.materials, 23);
+  w.fill_rect(40, 0, 2, 64, f.ids.stone);   // wall
+  w.fill_rect(0, 20, 40, 44, f.ids.water);  // pool left of the wall, with a partial top row
+  w.set(0, 19, f.ids.water);
+  CHECK(run_until_settled(w, 6000) < 6000);
+  w.fill_rect(40, 0, 2, 64, px::kEmpty);
+  run(w, 3000);
+  int right_side = 0;
+  for (int y = 0; y < w.height(); ++y)
+    for (int x = 64; x < w.width(); ++x) right_side += w.get(x, y) == f.ids.water ? 1 : 0;
+  CHECK(right_side > 500);  // a good share flowed across
+}
+
 TEST(mass_is_conserved) {
   Fixture f;
   px::World w(4, 3, f.materials, 11);
@@ -237,6 +270,8 @@ TEST(water_crosses_chunk_edges_without_terracing) {
     max_top = std::max(max_top, top);
   }
   CHECK(max_top - min_top <= 2);  // one flat sheet across all six chunks
+  // ...that then goes to sleep instead of shuffling forever.
+  CHECK(run_until_settled(w, 3000) < 3000);
 }
 
 // ------------------------------------------------------------------ step 2:

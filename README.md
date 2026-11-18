@@ -147,6 +147,11 @@ Each step (`px::step`, fixed at 60 per second):
      `dispersion` distance, stopping early over drops. Each liquid cell keeps
      the direction it last flowed in (`velocity_x`) until blocked, so water
      surges and spreads like a current instead of jittering in place.
+     A cell that keeps bouncing back and forth without dropping (about 240
+     reversals) *settles*: it then only steps into an adjacent drop or under
+     a lighter liquid. A lake with a partial top row goes to sleep, while a
+     breached container still drains. Only reversals count, so a cell crossing
+     a long, slightly higher stretch keeps going until it finds the edge.
    - **Gas** rises with its `rise_chance`, bubbles up through liquids, sorts
      above denser gases and drifts sideways.
    - Movers displace lighter liquids/gases (sand sinks through water).
@@ -202,8 +207,6 @@ machines by ±15%.
 
 ## Known limitations / next steps
 
-- A liquid surface with a partial top layer keeps shuffling sideways and never
-  fully sleeps; a settle heuristic will fix this.
 - Single-threaded. A 10-million-cell world with ~3M cells moving at once takes
   ~115 ms per step (the app's 512×320 world and the 2048×1152 benchmark stay
   well inside 16.7 ms). The planned path is a checkerboard chunk update (chunks in
