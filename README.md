@@ -45,6 +45,14 @@ smoke, oil, temperature) are in place:
 | lava | liquid | 1200 °C heat source; with water makes stone + steam |
 | ice | solid | starts at −30 °C, melts above 1 °C |
 
+## Download (Windows)
+
+A prebuilt 64-bit Windows build is in
+[`releases/PixelSandbox-win64.zip`](releases/PixelSandbox-win64.zip). Download
+it, right-click → **Extract All**, then run `pixel_sandbox.exe` (keep
+`SDL2.dll` beside it). Windows SmartScreen may warn because the exe is
+unsigned: choose **More info → Run anyway**.
+
 ## Building
 
 Requirements: CMake 3.20+, a C++20 compiler, and SDL2 development files for the
