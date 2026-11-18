@@ -1,20 +1,32 @@
-// Interactive sandbox: paint materials and watch them simulate.
+// Interactive sandbox: explore a generated world, paint materials and watch
+// them simulate.
 //
 // Controls
+//   WASD / arrows  move the camera (hold Shift to move faster)
+//   Middle mouse   drag to move the camera
+//   Home           back to the starting point
 //   Left mouse     paint the selected material
 //   Right mouse    erase
 //   Mouse wheel    brush size
 //   1 sand   2 water   3 stone   4 oil   5 wood
 //   6 fire   7 lava    8 ice     9 steam 0 smoke
+//   Q / E          previous / next material (all of them, incl. dirt, coal...)
 //   T              toggle heat view (temperature map)
 //   Space          pause / resume
 //   . (period)     single step while paused
-//   R              rebuild the demo scene
+//   R              regenerate the world (same seed)
+//   N              new world (new seed)
 //   C              clear the world
-//   D              toggle the active-region (dirty rect) overlay
+//   F              toggle the active-region (dirty rect) overlay
 //   Esc            quit
 //
-// Command line: --frames N  quit after N frames (for smoke tests).
+// The generated world wraps around horizontally: keep going right and you come
+// back to where you started.
+//
+// Command line:
+//   --seed N    world seed (default 0xC0FFEE)
+//   --demo      the small hand-built demo scene instead of a generated world
+//   --frames N  quit after N frames (for smoke tests)
 
 #include <SDL.h>
 
@@ -24,19 +36,27 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "core/material.hpp"
+#include "core/rng.hpp"
 #include "core/simulator.hpp"
 #include "core/world.hpp"
 #include "render/pixel_renderer.hpp"
 #include "world/demo_scene.hpp"
+#include "world/world_gen.hpp"
 
 namespace {
 
-constexpr int kWorldChunksX = 8;  // 512 x 320 cells
-constexpr int kWorldChunksY = 5;
+constexpr int kWorldChunksX = 64;  // 4096 x 1536 cells, wrapping around in x
+constexpr int kWorldChunksY = 24;
+constexpr int kDemoChunksX = 8;  // 512 x 320 cells
+constexpr int kDemoChunksY = 5;
+constexpr int kViewW = 640;  // camera size in cells
+constexpr int kViewH = 360;
+constexpr double kCameraSpeed = 420.0;  // cells per second (x3 with Shift)
 constexpr int kWindowScale = 2;
 constexpr double kStepSeconds = 1.0 / 60.0;
 constexpr int kMaxStepsPerFrame = 4;  // avoid a spiral of death if the sim falls behind
@@ -84,22 +104,51 @@ void report_error(const char* what) {
 
 int main(int argc, char** argv) {
   long max_frames = -1;
+  bool demo = false;
+  std::uint64_t seed = 0xC0FFEEULL;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) max_frames = std::atol(argv[++i]);
+    else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) seed = std::strtoull(argv[++i], nullptr, 0);
+    else if (std::strcmp(argv[i], "--demo") == 0) demo = true;
   }
 
   px::MaterialRegistry materials;
   const px::BaseMaterials ids = px::register_base_materials(materials);
-  px::World world(kWorldChunksX, kWorldChunksY, materials, 0xC0FFEEULL);
-  px::build_demo_scene(world, ids);
   px::PixelRenderer renderer(materials);
+
+  // The World's seed drives both generation and the simulation's randomness,
+  // so a new seed means a new World object.
+  auto make_world = [&](std::uint64_t s) {
+    return demo ? std::make_unique<px::World>(kDemoChunksX, kDemoChunksY, materials, s)
+                : std::make_unique<px::World>(kWorldChunksX, kWorldChunksY, materials, s, px::EdgeX::Wrap);
+  };
+  std::unique_ptr<px::World> world_ptr = make_world(seed);
+  const int w = demo ? world_ptr->width() : kViewW;  // view size in cells
+  const int h = demo ? world_ptr->height() : kViewH;
+
+  // Camera: top-left of the view in world cells. x is never wrapped here (the
+  // renderer and World wrap it), so a paint stroke stays continuous while the
+  // camera crosses the seam.
+  double cam_x = 0.0, cam_y = 0.0;
+  double home_x = 0.0, home_y = 0.0;
+  auto build = [&](px::World& wd) {
+    if (demo) {
+      px::build_demo_scene(wd, ids);
+      return;
+    }
+    const px::WorldGenerator gen(ids, wd.seed(), wd.width(), wd.height());
+    gen.generate(wd);
+    home_x = wd.width() / 2.0 - w / 2.0;
+    home_y = std::clamp(gen.surface_y(wd.width() / 2) - h / 3, 0, wd.height() - h);
+    cam_x = home_x;
+    cam_y = home_y;
+  };
+  build(*world_ptr);
 
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     report_error("SDL_Init");
     return 1;
   }
-  const int w = world.width();
-  const int h = world.height();
   SDL_Window* window = SDL_CreateWindow("Pixel Sandbox", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                         w * kWindowScale, h * kWindowScale, SDL_WINDOW_RESIZABLE);
   if (!window) {
@@ -133,14 +182,19 @@ int main(int argc, char** argv) {
   bool stroke_active = false;
   int stroke_x = 0, stroke_y = 0;
   bool painted_this_frame = false;
-  // SDL_GetMouseState returns window pixels; convert those to world cells.
-  auto to_world = [&](int window_x, int window_y, int& x, int& y) {
+  // SDL_GetMouseState returns window pixels; convert those to view cells.
+  auto to_view = [&](int window_x, int window_y, int& x, int& y) {
     float lx = 0, ly = 0;
     SDL_RenderWindowToLogical(sdl_renderer, window_x, window_y, &lx, &ly);
     x = static_cast<int>(std::floor(lx));
     y = static_cast<int>(std::floor(ly));
   };
-  auto stroke_to = [&](int x, int y, bool erase) {
+  // View cells to world cells (x unwrapped; World::set wraps it).
+  auto cam_ix = [&] { return static_cast<int>(std::floor(cam_x)); };
+  auto cam_iy = [&] { return static_cast<int>(std::floor(cam_y)); };
+  auto stroke_to = [&](int view_x, int view_y, bool erase) {
+    px::World& world = *world_ptr;
+    const int x = view_x + cam_ix(), y = view_y + cam_iy();
     const px::MaterialId m = erase ? px::kEmpty : brush.material;
     const float coverage = erase ? 1.0f : coverage_for(materials, m);
     if (stroke_active) {
@@ -162,7 +216,31 @@ int main(int argc, char** argv) {
   int frames = 0, sim_steps = 0;
   px::StepStats last_stats;
 
+  bool panning = false;
+  int pan_x = 0, pan_y = 0;
+  auto clamp_camera = [&] {
+    if (demo) return;
+    cam_y = std::clamp(cam_y, 0.0, static_cast<double>(world_ptr->height() - h));
+  };
+  auto cycle_material = [&](int dir) {
+    const int n = static_cast<int>(materials.size());
+    int m = brush.material;
+    do m = (m + dir + n) % n;
+    while (m == px::kEmpty);
+    brush.material = static_cast<px::MaterialId>(m);
+  };
+
+  bool new_world = false;
   for (long frame = 0; running && (max_frames < 0 || frame < max_frames); ++frame) {
+    if (new_world) {  // swapped between frames: `world` below must stay valid for the whole frame
+      seed = px::hash32(static_cast<std::uint32_t>(seed) + 0x9E3779B9U) |
+             (static_cast<std::uint64_t>(px::hash32(static_cast<std::uint32_t>(seed >> 32) + 1U)) << 32);
+      world_ptr = make_world(seed);
+      build(*world_ptr);
+      stroke_active = false;
+      new_world = false;
+    }
+    px::World& world = *world_ptr;
     painted_this_frame = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -185,14 +263,26 @@ int main(int argc, char** argv) {
             case SDLK_8: brush.material = ids.ice; break;
             case SDLK_9: brush.material = ids.steam; break;
             case SDLK_0: brush.material = ids.smoke; break;
+            case SDLK_q: cycle_material(-1); break;
+            case SDLK_e: cycle_material(1); break;
             case SDLK_t: show_heat = !show_heat; break;
-            case SDLK_r: px::build_demo_scene(world, ids); break;
+            case SDLK_r: build(world); break;
+            case SDLK_n: new_world = true; break;
             case SDLK_c: world.clear(); break;
-            case SDLK_d: show_dirty = !show_dirty; break;
+            case SDLK_f: show_dirty = !show_dirty; break;
+            case SDLK_HOME:
+              cam_x = home_x;
+              cam_y = home_y;
+              break;
             default: break;
           }
           break;
         case SDL_MOUSEBUTTONDOWN:
+          if (e.button.button == SDL_BUTTON_MIDDLE) {
+            panning = true;
+            pan_x = e.button.x;
+            pan_y = e.button.y;
+          }
           if (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT) {
             // SDL already reports mouse events in logical (world) coordinates
             // because the renderer has a logical size set.
@@ -201,11 +291,19 @@ int main(int argc, char** argv) {
           }
           break;
         case SDL_MOUSEMOTION:
+          if (panning && !demo) {
+            cam_x -= e.motion.x - pan_x;
+            cam_y -= e.motion.y - pan_y;
+            pan_x = e.motion.x;
+            pan_y = e.motion.y;
+            clamp_camera();
+          }
           if (e.motion.state & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) {
             stroke_to(e.motion.x, e.motion.y, (e.motion.state & SDL_BUTTON_LMASK) == 0);
           }
           break;
         case SDL_MOUSEBUTTONUP:
+          if (e.button.button == SDL_BUTTON_MIDDLE) panning = false;
           if ((SDL_GetMouseState(nullptr, nullptr) & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) == 0) stroke_active = false;
           break;
         case SDL_MOUSEWHEEL:
@@ -216,19 +314,31 @@ int main(int argc, char** argv) {
       }
     }
 
+    const auto now = clock::now();
+    const double dt = std::chrono::duration<double>(now - previous).count();
+    previous = now;
+
+    // Camera movement from the keyboard.
+    if (!demo) {
+      const Uint8* keys = SDL_GetKeyboardState(nullptr);
+      const double speed = kCameraSpeed * std::min(dt, 0.1) * (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT] ? 3.0 : 1.0);
+      if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) cam_x -= speed;
+      if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) cam_x += speed;
+      if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) cam_y -= speed;
+      if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) cam_y += speed;
+      clamp_camera();
+    }
+
     // Holding the button still keeps pouring at the cursor.
     int wx = 0, wy = 0;
     const Uint32 buttons = SDL_GetMouseState(&wx, &wy);
     int mx = 0, my = 0;
-    to_world(wx, wy, mx, my);
+    to_view(wx, wy, mx, my);
     if (stroke_active && !painted_this_frame && (buttons & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK))) {
       stroke_to(mx, my, (buttons & SDL_BUTTON_LMASK) == 0);
     }
 
     // Fixed-timestep simulation.
-    const auto now = clock::now();
-    const double dt = std::chrono::duration<double>(now - previous).count();
-    previous = now;
     accumulator = std::min(accumulator + dt, kStepSeconds * kMaxStepsPerFrame);
     if (paused) accumulator = 0.0;
     int steps = paused ? (single_step ? 1 : 0) : static_cast<int>(accumulator / kStepSeconds);
@@ -241,9 +351,10 @@ int main(int argc, char** argv) {
       if (!paused) accumulator -= kStepSeconds;
     }
 
-    if (show_heat) renderer.render_temperature(world, pixels.data(), w);
-    else renderer.render(world, pixels.data(), w);
-    if (show_dirty) renderer.draw_dirty_rects(world, pixels.data(), w);
+    const px::Viewport view{cam_ix(), cam_iy(), w, h};
+    if (show_heat) renderer.render_temperature(world, pixels.data(), w, view);
+    else renderer.render(world, pixels.data(), w, view);
+    if (show_dirty) renderer.draw_dirty_rects(world, pixels.data(), w, view);
     draw_brush_outline(pixels.data(), w, h, mx, my, brush.radius);
     SDL_UpdateTexture(texture, nullptr, pixels.data(), w * static_cast<int>(sizeof(std::uint32_t)));
     SDL_RenderClear(sdl_renderer);
@@ -253,12 +364,17 @@ int main(int argc, char** argv) {
     ++frames;
     title_timer += dt;
     if (title_timer >= 0.5) {
-      char title[256];
+      char where[96] = "";
+      if (!demo) {
+        std::snprintf(where, sizeof(where), " | seed %llu | x %d/%d depth %d", static_cast<unsigned long long>(seed),
+                      world.wrap_x(cam_ix() + w / 2), world.width(), cam_iy() + h / 2);
+      }
+      char title[320];
       std::snprintf(title, sizeof(title),
-                    "Pixel Sandbox | %s | brush %d | %.0f fps | sim %.2f ms | active chunks %d/%d%s%s",
+                    "Pixel Sandbox | %s | brush %d | %.0f fps | sim %.2f ms | active chunks %d/%d%s%s%s",
                     materials.def(brush.material).name.c_str(), brush.radius, frames / title_timer,
                     sim_steps ? sim_ms_sum / sim_steps : 0.0, last_stats.active_chunks,
-                    world.width_chunks() * world.height_chunks(), show_heat ? " | HEAT VIEW" : "",
+                    world.width_chunks() * world.height_chunks(), where, show_heat ? " | HEAT VIEW" : "",
                     paused ? " | PAUSED" : "");
       SDL_SetWindowTitle(window, title);
       title_timer = 0.0;

@@ -24,6 +24,7 @@
 #include "core/simulator.hpp"
 #include "core/world.hpp"
 #include "world/demo_scene.hpp"
+#include "world/world_gen.hpp"
 
 namespace {
 
@@ -213,12 +214,13 @@ int main(int argc, char** argv) {
 
   // ------------------------------------------------- fuzz, every material
   const int ops2 = quick ? 3000 : 20000;
-  std::printf("\nEditing fuzz with every material (fire, lava, ice, steam...): %d operations\n", ops2);
+  std::printf("\nEditing fuzz with every material (fire, lava, ice, steam...) on a wrapping world: %d operations\n", ops2);
   {
-    px::World w(8, 5, reg, 0xF12E);
+    px::World w(8, 5, reg, 0xF12E, px::EdgeX::Wrap);  // brush strokes far off either side wrap around
     px::build_demo_scene(w, ids);
-    const px::MaterialId palette[] = {px::kEmpty, ids.stone, ids.sand,  ids.water, ids.oil,   ids.wood,
-                                      ids.fire,   ids.flame, ids.smoke, ids.steam, ids.lava, ids.ice};
+    const px::MaterialId palette[] = {px::kEmpty, ids.stone, ids.sand,  ids.water, ids.oil,  ids.wood,
+                                      ids.fire,   ids.flame, ids.smoke, ids.steam, ids.lava, ids.ice,
+                                      ids.dirt,   ids.grass, ids.coal,  ids.leaves, ids.basalt};
     std::uint32_t seed = 777;
     auto rnd = [&](int n) {
       seed = px::hash32(seed + 0x9E3779B9U);
@@ -231,7 +233,8 @@ int main(int argc, char** argv) {
       if (kind < 1) {
         w.clear();
       } else if (kind < 2) {
-        px::build_demo_scene(w, ids);
+        if (rnd(2)) px::build_demo_scene(w, ids);
+        else px::generate_world(w, ids);  // generated terrain, mid-simulation
       } else if (kind < 60) {
         const int x = rnd(w.width() + 400) - 200;
         const int y = rnd(w.height() + 400) - 200;

@@ -108,7 +108,11 @@ void transform(StepContext& ctx, int x, int y, MaterialId to, std::uint16_t life
 /// and the next step: a sleeping neighbour may now have a gap large enough to
 /// exchange heat. Waking only the cell itself lets chunked simulation drift
 /// from updating every cell. Returns true if heat flowed.
+///
+/// A material with conductivity 0 is a perfect insulator: no heat crosses into
+/// or out of it (basalt sealing a buried lava chamber).
 bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
+  if (conductivity <= 0.0f) return false;
   World& w = ctx.world;
   Chunk& c = w.chunk_for(x, y);
   const int i = World::local_index(x, y);
@@ -123,7 +127,9 @@ bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
     const int ni = World::local_index(nx, ny);
     const int tn = nc.temperature[ni];
     if (tn == t) continue;
-    const float kc = (conductivity + ctx.materials.props(nc.material[ni]).conductivity) * 0.5f * kHeatRate;
+    const float nk = ctx.materials.props(nc.material[ni]).conductivity;
+    if (nk <= 0.0f) continue;  // insulator
+    const float kc = (conductivity + nk) * 0.5f * kHeatRate;
     int delta = static_cast<int>(static_cast<float>(tn - t) * kc);  // truncates toward zero
     // Let small gaps still close by a degree, otherwise cells stall a few
     // degrees off their neighbours forever. A gap of 1 is left alone (moving
@@ -334,7 +340,7 @@ int react(StepContext& ctx, int x, int y, MaterialId m, Rng& rng) {
 
 enum class StateResult { Unchanged, KeepAwake, Transformed };
 
-/// Heat, reactions, temperature transitions, lifetime, emission and flicker.
+/// Heat, reactions, temperature transitions, lifetime and emission.
 /// Kept out of line so the common path in update_cell (plain sand or water at
 /// ambient temperature) stays small: inlining this roughly doubled its cost.
 [[gnu::noinline]] StateResult update_state(StepContext& ctx, int x, int y, MaterialId m, const MaterialProps& p,
@@ -344,12 +350,12 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
   bool keep_awake = false;
 
   // Heat: sources hold their temperature; anything off ambient shares heat.
-  if (p.emits_heat) {
-    if (c.temperature[i] != p.spawn_temp) {
-      c.temperature[i] = p.spawn_temp;
-      ctx.world.wake(x, y);
-    }
-    keep_awake = true;
+  // A source already at its temperature with no heat flowing has nothing to do
+  // and may sleep: a neighbour cooling or changing wakes it again. Keeping every
+  // source awake made a buried lava pool cost CPU forever.
+  if (p.emits_heat && c.temperature[i] != p.spawn_temp) {
+    c.temperature[i] = p.spawn_temp;
+    ctx.world.wake(x, y);
   }
   if (c.temperature[i] != kAmbient && exchange_heat(ctx, x, y, p.conductivity)) keep_awake = true;
 
@@ -403,10 +409,6 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
     }
   }
 
-  if (p.flicker) {
-    c.shade[i] = static_cast<std::uint8_t>(rng.next() & 0x0F);
-    keep_awake = true;
-  }
   return keep_awake ? StateResult::KeepAwake : StateResult::Unchanged;
 }
 

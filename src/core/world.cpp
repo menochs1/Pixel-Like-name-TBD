@@ -6,13 +6,15 @@
 
 namespace px {
 
-World::World(int width_chunks, int height_chunks, const MaterialRegistry& materials, std::uint64_t seed)
+World::World(int width_chunks, int height_chunks, const MaterialRegistry& materials, std::uint64_t seed,
+             EdgeX edge_x)
     : width_chunks_(width_chunks),
       height_chunks_(height_chunks),
       width_(width_chunks * kChunkSize),
       height_(height_chunks * kChunkSize),
       materials_(&materials),
-      seed_(seed) {
+      seed_(seed),
+      wrap_x_(edge_x == EdgeX::Wrap) {
   if (width_chunks <= 0 || height_chunks <= 0) {
     throw std::invalid_argument("World: dimensions must be positive");
   }
@@ -21,6 +23,7 @@ World::World(int width_chunks, int height_chunks, const MaterialRegistry& materi
 
 void World::set(int x, int y, MaterialId material) {
   if (!in_bounds(x, y)) return;
+  x = wrap_x(x);  // the shade and lifetime hashes must not depend on which copy of x was used
   Chunk& c = chunk_for(x, y);
   const int i = local_index(x, y);
   const MaterialProps& p = materials_->props(material);
@@ -57,7 +60,7 @@ void World::fill_circle(int cx, int cy, int radius, MaterialId material, float c
       if (dx * dx + dy * dy > radius * radius) continue;
       const int x = cx + dx;
       const int y = cy + dy;
-      if (coverage < 1.0f && (cell_hash(seed_ ^ 0xB5, x, y, tick_) & 0xFFFF) > threshold) continue;
+      if (coverage < 1.0f && (cell_hash(seed_ ^ 0xB5, wrap_x(x), y, tick_) & 0xFFFF) > threshold) continue;
       set(x, y, material);
     }
   }

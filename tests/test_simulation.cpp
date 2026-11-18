@@ -504,3 +504,116 @@ TEST(new_material_from_data_only_acid_eats_stone) {
   CHECK(count_in(w, f.ids.stone) < stone_before - 100);  // it dissolved a hole
   CHECK(count_in(w, acid_id) < 240);                       // and was used up doing it
 }
+
+// ------------------------------------------------------------------ step 3:
+// horizontal wrapping
+
+TEST(wrapping_world_maps_every_x_onto_the_ring) {
+  Fixture f;
+  px::World w(2, 1, f.materials, 1, px::EdgeX::Wrap);
+  CHECK(w.wraps_x());
+  CHECK(w.in_bounds(-1, 10));
+  CHECK(w.in_bounds(w.width() + 5, 10));
+  CHECK(!w.in_bounds(5, -1));  // top and bottom are still walls
+  CHECK(!w.in_bounds(5, w.height()));
+  w.set(-1, 10, f.ids.stone);  // writes the last column
+  CHECK_EQ(w.get(w.width() - 1, 10), f.ids.stone);
+  w.set(w.width() * 3 + 2, 11, f.ids.sand);  // several laps around
+  CHECK_EQ(w.get(2, 11), f.ids.sand);
+  CHECK_EQ(w.get(2 - w.width() * 5, 11), f.ids.sand);
+  CHECK_EQ(w.get(5, -1), px::kOutOfBounds);
+  CHECK_EQ(w.wrap_x(-1), w.width() - 1);
+  CHECK_EQ(w.wrap_x(w.width()), 0);
+  // The same cell through a different lap gets the same colour shade.
+  px::World a(2, 1, f.materials, 9, px::EdgeX::Wrap), b(2, 1, f.materials, 9, px::EdgeX::Wrap);
+  a.set(3, 3, f.ids.sand);
+  b.set(3 + b.width(), 3, f.ids.sand);
+  CHECK_EQ(a.chunk_for(3, 3).shade[px::World::local_index(3, 3)], b.chunk_for(3, 3).shade[px::World::local_index(3, 3)]);
+}
+
+TEST(walled_world_keeps_its_side_walls) {
+  Fixture f;
+  px::World w(2, 1, f.materials, 1);
+  CHECK(!w.wraps_x());
+  CHECK_EQ(w.get(-1, 10), px::kOutOfBounds);
+  CHECK_EQ(w.get(w.width(), 10), px::kOutOfBounds);
+}
+
+TEST(sand_slides_across_the_seam) {
+  Fixture f;
+  px::World w(2, 1, f.materials, 4, px::EdgeX::Wrap);
+  w.fill_rect(0, 63, w.width(), 1, f.ids.stone);
+  w.fill_rect(0, 20, 1, 43, f.ids.sand);  // a column right at x = 0
+  run_until_settled(w, 3000);
+  int left = 0, right = 0;  // sand that ended up across the seam vs. on the near side
+  for (int y = 0; y < 63; ++y) {
+    for (int x = w.width() - 20; x < w.width(); ++x) left += w.get(x, y) == f.ids.sand ? 1 : 0;
+    for (int x = 1; x < 20; ++x) right += w.get(x, y) == f.ids.sand ? 1 : 0;
+  }
+  CHECK(left > 5);  // the pile spread onto the far side of the seam
+  CHECK(right > 5);
+  CHECK_EQ(w.count(f.ids.sand), std::size_t{43});
+}
+
+TEST(water_levels_around_the_whole_ring) {
+  Fixture f;
+  px::World w(3, 1, f.materials, 9, px::EdgeX::Wrap);
+  w.fill_rect(0, 63, w.width(), 1, f.ids.stone);
+  w.fill_rect(w.width() - 20, 10, 40, 40, f.ids.water);  // straddles the seam
+  run(w, 3000);
+  int min_col = 64, max_col = 0;
+  for (int x = 0; x < w.width(); ++x) {
+    int col = 0;
+    for (int y = 0; y < w.height(); ++y) col += w.get(x, y) == f.ids.water ? 1 : 0;
+    min_col = std::min(min_col, col);
+    max_col = std::max(max_col, col);
+  }
+  CHECK(max_col - min_col <= 1);  // no wall at the seam: one flat sheet all the way round
+  CHECK_EQ(w.count(f.ids.water), std::size_t{40 * 40});
+  CHECK(run_until_settled(w, 3000) < 3000);
+}
+
+TEST(heat_flows_across_the_seam) {
+  Fixture f;
+  // A hot spot on the seam spreads exactly like one in the middle of the world.
+  auto spread = [&](int hot_x, int dx) {
+    px::World w(2, 1, f.materials, 2, px::EdgeX::Wrap);
+    w.fill_rect(0, 30, w.width(), 3, f.ids.stone);
+    w.set_temperature(hot_x, 31, 1000);
+    run(w, 8);
+    return w.temperature(hot_x + dx, 31);
+  };
+  CHECK(spread(0, -1) > 100);  // the far side of the seam warmed up
+  CHECK(spread(0, 1) > 100);
+  // Not bit-identical: the neighbour across the seam is visited at the other
+  // end of the row scan, and heat exchange depends slightly on update order.
+  CHECK(std::abs(spread(0, -1) - spread(64, -1)) <= 5);
+  CHECK(std::abs(spread(0, 2) - spread(64, 2)) <= 3);
+}
+
+TEST(chunk_sleeping_matches_updating_everything_on_a_wrapping_world) {
+  Fixture f;
+  px::World chunked(4, 2, f.materials, 0xBEEF, px::EdgeX::Wrap);
+  px::World full(4, 2, f.materials, 0xBEEF, px::EdgeX::Wrap);
+  for (px::World* w : {&chunked, &full}) {
+    w->fill_rect(0, w->height() - 6, w->width(), 6, f.ids.stone);
+    w->fill_rect(w->width() - 40, 20, 80, 60, f.ids.water);  // across the seam
+    w->fill_rect(-10, 0, 20, 15, f.ids.sand);
+    w->fill_rect(100, 90, 20, 10, f.ids.oil);
+    w->fill_rect(100, 100, 4, 4, f.ids.fire);
+    w->fill_rect(w->width() - 3, 110, 6, 6, f.ids.lava);  // hot spot on the seam
+  }
+  bool identical = true;
+  for (int s = 0; s < 400 && identical; ++s) {
+    px::step(chunked);
+    full.wake_all();
+    px::step(full);
+    for (int y = 0; y < full.height() && identical; ++y)
+      for (int x = 0; x < full.width(); ++x)
+        if (chunked.get(x, y) != full.get(x, y) || chunked.temperature(x, y) != full.temperature(x, y)) {
+          identical = false;
+          break;
+        }
+  }
+  CHECK(identical);
+}

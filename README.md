@@ -11,7 +11,8 @@ Development goals and guidance live in
 ## Status
 
 Roadmap steps 1 (cellular automata, sand, water, stone, chunks) and 2 (fire,
-smoke, oil, temperature) are in place:
+smoke, oil, temperature) are in place, and step 3 has started with seeded
+world generation and a world that wraps around:
 
 - Chunked world (64×64 chunks) stored as a structure of arrays.
 - Active-region tracking: each chunk keeps a dirty rectangle, so settled areas
@@ -28,6 +29,12 @@ smoke, oil, temperature) are in place:
 - Pair reactions (lava + water → stone + steam, fire + water → doused) come
   from a reaction table, not engine code.
 - Simulation is fully separate from rendering and runs headless.
+- Worlds can wrap around horizontally (`EdgeX::Wrap`): walk far enough to one
+  side and you are back where you started. Sand, liquids, heat and painting all
+  cross the seam as if it were not there.
+- Seeded world generation: biomes, hills, caves, water and oil pools, sealed
+  magma chambers, coal and trees, all from one seed. Every chunk is a pure
+  function of (seed, x, y), ready for save/load and streaming.
 
 ### Materials
 
@@ -44,6 +51,11 @@ smoke, oil, temperature) are in place:
 | steam | gas | rises, condenses back to water below 90 °C |
 | lava | liquid | 1200 °C heat source; with water makes stone + steam |
 | ice | solid | starts at −30 °C, melts above 1 °C |
+| dirt | solid | topsoil |
+| grass | solid | ignites at 200 °C, burns quickly |
+| coal | solid | hard to light (350 °C), smoulders for ~15 s |
+| leaves | solid | ignites at 180 °C, burns fast |
+| basalt | solid | perfect insulator (conductivity 0); seals magma chambers |
 
 ## Download (Windows)
 
@@ -83,29 +95,39 @@ Run the sandbox:
 ./build/pixel_sandbox
 ```
 
+The sandbox opens on a generated 4096×1536 world that wraps around
+horizontally, viewed through a 640×360 camera. `--seed N` picks the world;
+`--demo` opens the small hand-built demo scene instead (an oil pit beside a
+wooden tower, a water basin and a lava crucible).
+
 | Input | Action |
 | --- | --- |
+| `WASD` / arrows | Move the camera (`Shift` = faster) |
+| Middle mouse drag | Move the camera |
+| `Home` | Back to the starting point |
 | Left mouse | Paint selected material |
 | Right mouse | Erase |
 | Mouse wheel | Brush size |
 | `1`–`5` | Sand / water / stone / oil / wood |
 | `6`–`0` | Fire / lava / ice / steam / smoke |
+| `Q` / `E` | Previous / next material (all, including dirt, coal, basalt…) |
 | `T` | Heat view (temperature map) |
 | `Space` | Pause / resume |
 | `.` | Single step while paused |
-| `R` | Rebuild demo scene |
+| `R` | Regenerate the world (same seed) |
+| `N` | New world (new seed) |
 | `C` | Clear world |
-| `D` | Show active (dirty) regions |
+| `F` | Show active (dirty) regions |
 
-The window title shows FPS, simulation time per step and active chunk count.
-The demo scene has an oil pit with a plank leading into a wooden tower (drop
-fire on the oil), a water basin, and a lava crucible on the right.
+The window title shows FPS, simulation time per step, active chunk count, the
+seed and the camera position.
 
 Run the tests, benchmark and stress test:
 
 ```bash
 ctest --test-dir build --output-on-failure
 ./build/pixel_bench --scene rain --steps 600            # add --ppm out.ppm to save the final frame
+./build/pixel_bench --scene gen --seed 42 --ppm w.ppm   # generate a world, time it, save a picture
 ./build/pixel_stress                                    # worst-case load, editing fuzz, long run; --quick for a short pass
 ```
 
@@ -120,7 +142,7 @@ cmake --build build-asan && ./build-asan/px_tests && ./build-asan/pixel_stress
 
 ```
 src/core/     material registry, chunk storage, world, simulator (no dependencies)
-src/world/    scene / world generation
+src/world/    seeded world generation, demo scenes
 src/render/   World -> ARGB pixel buffer (no SDL)
 src/app/      SDL2 window, input, fixed 60 Hz timestep
 tools/        headless benchmark / snapshot tool, stress test
@@ -169,6 +191,50 @@ Chunking is purely an optimisation: tests check that the chunked simulation
 produces exactly the same materials and temperatures as updating every cell
 every step, including with fire, lava, steam and ice.
 
+### Wrapping worlds
+
+`World(…, EdgeX::Wrap)` joins the left and right edges. Every accessor accepts
+any x and maps it onto the ring, so simulation code reads `x - 1` or `x + 8`
+without special cases. The world is a whole number of chunks wide, so a cell
+and its wrapped copy share the same chunk-local index; only chunk columns
+wrap. The top and bottom stay solid. Tests check that chunked simulation is
+still bit-identical to updating every cell on a wrapping world, and that
+water levels out all the way round.
+
+## World generation
+
+`WorldGenerator` (`src/world/world_gen.hpp`) builds a world from a seed:
+
+- **Surface:** rolling hills whose shape depends on the biome: sandy desert
+  dunes, grassy meadows with trees and lakes in the deepest valleys, and bare
+  rocky highlands with peaks. Biome terrain is blended with smooth weights, so
+  there are no cliffs where biomes meet.
+- **Underground:** stone with coal seams and pockets of dirt and sand. Winding
+  tunnels and large caverns grow with depth, with some regions riddled and
+  others nearly solid. A few tunnels break through to the surface as entrances.
+- **Pools:** oval cavities filled with water (shallow), water or oil (middle)
+  up to a flat level. Below that level, a stone shell overrides the caves, so
+  the liquid is contained and starts at rest. Caves can still break into the
+  air above it.
+- **Magma chambers:** the deepest pools are lava, completely filled and sealed
+  in insulating basalt. Lava open to air or rock would keep heating its
+  surroundings forever and keep those chunks awake; sealed, it sleeps until
+  you dig in.
+
+Design points:
+
+- **Chunk-independent.** Each cell is a pure function of (seed, x, y), with no
+  flood fills or passes that carry state between chunks. A chunk generated
+  alone, in any order or on any thread, comes out identical (tested), which
+  is what save/load and streaming need. `generate()` fills chunks in parallel.
+- **Seamless wrap.** All noise is periodic in x with the world width, so
+  terrain, caves and biomes join up exactly across the seam (tested).
+- **Generated at rest.** Only cells that can move or change are woken. On the
+  4096×1536 app world, generation takes ~0.3 s on 4 threads, and the world
+  then settles to a handful of active chunks, averaging ~0.2 ms per step.
+- **Scales with size.** Depths are fractions of the world height and feature
+  sizes are rounded to fit the width, so any size works.
+
 ### Adding a material
 
 ```cpp
@@ -216,5 +282,9 @@ machines by ±15%.
   stone in 10 seconds. Temperatures are whole degrees and a 1° gap does not
   flow, so buried layers can settle a degree per layer above ambient.
 - Steam and smoke drift as scattered particles rather than billowing clouds.
-- The world is a fixed grid of chunks; streaming/infinite worlds come with
-  seeded world generation (roadmap step 3, next).
+- The world is still one fixed grid of chunks held in memory (60 MiB for the
+  app world). Generation is already per chunk, so save/load and then chunk
+  streaming are the next parts of roadmap step 3.
+- Only horizontal wrapping; the top and bottom are solid.
+- Flicker (fire, lava) is now purely a rendering effect animated from the
+  world tick, so a still lava pool costs the simulation nothing.

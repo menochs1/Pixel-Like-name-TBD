@@ -1,9 +1,10 @@
 // Headless benchmark and snapshot tool.
 //
-//   pixel_bench [--scene rain|demo] [--steps N] [--ppm out.ppm]
+//   pixel_bench [--scene rain|demo|gen] [--seed N] [--steps N] [--ppm out.ppm]
 //
 // Runs the simulation without a window, reports per-step timing and activity,
-// and can write the final frame as a binary PPM image.
+// and can write the final frame as a binary PPM image. `gen` generates the
+// app's 4096x1536 wrapping world from --seed and also reports how long that took.
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include "core/world.hpp"
 #include "render/pixel_renderer.hpp"
 #include "world/demo_scene.hpp"
+#include "world/world_gen.hpp"
 
 namespace {
 
@@ -44,12 +46,14 @@ int main(int argc, char** argv) {
   std::string scene = "rain";
   std::string ppm;
   int steps = 600;
+  std::uint64_t seed = 0xC0FFEEULL;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) scene = argv[++i];
     else if (std::strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--ppm") == 0 && i + 1 < argc) ppm = argv[++i];
+    else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) seed = std::strtoull(argv[++i], nullptr, 0);
     else {
-      std::fprintf(stderr, "usage: %s [--scene rain|demo] [--steps N] [--ppm out.ppm]\n", argv[0]);
+      std::fprintf(stderr, "usage: %s [--scene rain|demo|gen] [--seed N] [--steps N] [--ppm out.ppm]\n", argv[0]);
       return 2;
     }
   }
@@ -57,9 +61,19 @@ int main(int argc, char** argv) {
   px::MaterialRegistry materials;
   const px::BaseMaterials ids = px::register_base_materials(materials);
   const bool rain = scene == "rain";
-  px::World world(rain ? 32 : 8, rain ? 18 : 5, materials, 0xC0FFEEULL);
-  if (rain) px::build_rain_scene(world, ids);
-  else px::build_demo_scene(world, ids);
+  const bool gen = scene == "gen";
+  px::World world(gen ? 64 : (rain ? 32 : 8), gen ? 24 : (rain ? 18 : 5), materials, seed,
+                  gen ? px::EdgeX::Wrap : px::EdgeX::Wall);
+  if (gen) {
+    const auto t0 = std::chrono::steady_clock::now();
+    px::generate_world(world, ids);
+    std::printf("generated in %.0f ms\n",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+  } else if (rain) {
+    px::build_rain_scene(world, ids);
+  } else {
+    px::build_demo_scene(world, ids);
+  }
 
   const std::size_t sand0 = world.count(ids.sand);
   const std::size_t water0 = world.count(ids.water);
@@ -92,8 +106,10 @@ int main(int argc, char** argv) {
   std::printf("avg per step: %.0f cells scanned, %.0f cells moved (peak %lld), %.1f active chunks\n",
               static_cast<double>(scanned) / steps, static_cast<double>(moved) / steps,
               static_cast<long long>(peak_moved), static_cast<double>(active) / steps);
-  const bool conserved = world.count(ids.sand) == sand0 && world.count(ids.water) == water0;
-  std::printf("mass conserved: %s\n", conserved ? "yes" : "NO");
+  // Generated worlds have lava meeting water, which legitimately converts mass.
+  const bool conserved = gen || (world.count(ids.sand) == sand0 && world.count(ids.water) == water0);
+  if (gen) std::printf("final active chunks: %d of %d\n", world.active_chunk_count(), world.width_chunks() * world.height_chunks());
+  else std::printf("mass conserved: %s\n", conserved ? "yes" : "NO");
 
   if (!ppm.empty()) {
     px::PixelRenderer renderer(materials);

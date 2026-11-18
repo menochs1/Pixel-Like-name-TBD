@@ -41,14 +41,14 @@ struct MaterialDef {
   float density = 0.0f;              // kg/m^3; denser movers displace lighter fluids/gases
   Color color{};
   std::uint8_t color_variation = 0;  // +/- brightness jitter per pixel
-  bool flicker = false;              // re-roll colour shade every step (fire)
+  bool flicker = false;              // visual only: the renderer animates its colour (fire, lava)
 
   // Movement
   std::uint8_t dispersion = 0;  // liquids/gases: max sideways cells per step
   float rise_chance = 0.0f;     // gases: chance to move up each step
 
   // Heat
-  float conductivity = 0.0f;                       // 0..1, how fast heat flows through it
+  float conductivity = 0.0f;                       // 0..1, how fast heat flows through it; 0 = perfect insulator
   std::optional<Temperature> spawn_temperature;    // temperature when created (else kept/ambient)
   bool emits_heat = false;                         // holds spawn_temperature (fire, lava)
 
@@ -102,7 +102,8 @@ struct MaterialProps {
   std::uint16_t emit_chance = 0;
   /// True if a cell of this material at ambient temperature with no lifetime
   /// running can still change state (emits heat, reacts, decays, emits,
-  /// flickers, or has a transition that triggers at ambient). Lets the
+  /// or has a transition that triggers at ambient). Flicker is not
+  /// simulation state: the renderer animates it. Lets the
   /// simulator skip all state logic for e.g. room-temperature sand and water.
   bool active_at_ambient = false;
 };
@@ -173,6 +174,11 @@ struct BaseMaterials {
   MaterialId steam = kEmpty;
   MaterialId lava = kEmpty;
   MaterialId ice = kEmpty;
+  MaterialId dirt = kEmpty;
+  MaterialId grass = kEmpty;
+  MaterialId coal = kEmpty;
+  MaterialId leaves = kEmpty;
+  MaterialId basalt = kEmpty;
 };
 
 /// Registers the built-in materials and reactions, finalizes the registry and

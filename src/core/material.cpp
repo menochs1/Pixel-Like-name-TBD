@@ -90,7 +90,7 @@ void MaterialRegistry::finalize() {
   auto flag_active = [&]() {
     for (MaterialProps& p : props_) {
       p.active_at_ambient = p.emits_heat || p.has_reactions || p.lifetime_max > 0 || p.emit_chance > 0 ||
-                            p.flicker || (p.has_spawn_temp && p.spawn_temp != kAmbient) ||
+                            (p.has_spawn_temp && p.spawn_temp != kAmbient) ||
                             (p.has_high && kAmbient >= p.high_temp) || (p.has_low && kAmbient <= p.low_temp);
     }
   };
@@ -285,6 +285,79 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.high_to = "water";
     d.high_chance = 0.004f;  // a block lasts several seconds once thawed
     ids.ice = add(d);
+  }
+
+  // Terrain materials used by world generation.
+  {
+    MaterialDef d;
+    d.name = "dirt";
+    d.phase = Phase::Solid;
+    d.density = 1500;
+    d.color = {112, 78, 52};
+    d.color_variation = 14;
+    d.conductivity = 0.25f;
+    d.durability = 60;
+    ids.dirt = add(d);
+  }
+  {
+    MaterialDef d;
+    d.name = "grass";
+    d.phase = Phase::Solid;
+    d.density = 1100;
+    d.color = {76, 142, 56};
+    d.color_variation = 18;
+    d.conductivity = 0.2f;
+    d.high_temp = 200;
+    d.high_to = "fire";
+    d.high_chance = 0.08f;
+    d.burn_time = 40;  // a quick grass fire
+    d.durability = 20;
+    ids.grass = add(d);
+  }
+  {
+    MaterialDef d;
+    d.name = "coal";
+    d.phase = Phase::Solid;
+    d.density = 1350;
+    d.color = {38, 36, 40};
+    d.color_variation = 8;
+    d.conductivity = 0.3f;
+    d.high_temp = 350;
+    d.high_to = "fire";
+    d.high_chance = 0.02f;
+    d.burn_time = 900;  // hard to light, smoulders for ~15 s
+    d.durability = 120;
+    ids.coal = add(d);
+  }
+  {
+    MaterialDef d;
+    d.name = "leaves";
+    d.phase = Phase::Solid;
+    d.density = 400;
+    d.color = {58, 118, 48};
+    d.color_variation = 24;
+    d.conductivity = 0.1f;
+    d.high_temp = 180;
+    d.high_to = "fire";
+    d.high_chance = 0.15f;
+    d.burn_time = 30;
+    d.durability = 5;
+    ids.leaves = add(d);
+  }
+
+  {
+    // Cooled lava rock. A perfect insulator (conductivity 0): a shell of it
+    // keeps a buried lava chamber hot inside and the rock around it cold, so
+    // neither costs anything until someone digs in.
+    MaterialDef d;
+    d.name = "basalt";
+    d.phase = Phase::Solid;
+    d.density = 2900;
+    d.color = {58, 52, 58};
+    d.color_variation = 10;
+    d.conductivity = 0.0f;
+    d.durability = 300;
+    ids.basalt = add(d);
   }
 
   // Pair reactions for contact effects that temperature alone does not give.
