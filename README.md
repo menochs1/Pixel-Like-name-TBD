@@ -35,6 +35,10 @@ world generation and a world that wraps around:
   holds a derived variant of its element. Each pixel also carries its own
   temperature and health (wear).
 - Simulation is fully separate from rendering and runs headless.
+- Sandbox tools: paint and erase any material, heat and cool brushes (melt
+  rock into lava, harden lava back into rock, boil, freeze, light and put out
+  fires), and a pixel inspector that shows every property of the pixel under
+  the cursor.
 - Worlds can wrap around horizontally (`EdgeX::Wrap`): walk far enough to one
   side and you are back where you started. Sand, liquids, heat and painting all
   cross the seam as if it were not there.
@@ -46,16 +50,16 @@ world generation and a world that wraps around:
 
 | Material | Phase | Behaviour |
 | --- | --- | --- |
-| stone | solid | inert, conducts heat |
+| stone | solid | conducts heat; melts into lava above 1500 °C (only a heat brush gets that hot) |
 | sand | powder | piles, sinks through liquids |
 | water | liquid | boils at 100 °C, freezes below −2 °C, douses fire |
 | oil | liquid | floats on water, ignites at 200 °C and burns for ~2.5 s |
 | wood | solid | ignites at 260 °C and burns slowly |
-| fire | solid | 900 °C heat source with a lifetime; throws flames, leaves smoke |
+| fire | solid | 900 °C heat source with a lifetime; throws flames, leaves smoke; goes out if cooled below 300 °C |
 | flame | gas | short-lived rising tongue of fire |
 | smoke | gas | rises and fades |
 | steam | gas | rises, condenses back to water below 90 °C |
-| lava | liquid | 1200 °C heat source; with water makes stone + steam |
+| lava | liquid | 1200 °C heat source; with water makes stone + steam; hardens into stone if cooled below 600 °C |
 | ice | solid | starts at −30 °C, melts above 1 °C |
 | dirt | solid | topsoil |
 | grass | solid | ignites at 200 °C, burns quickly |
@@ -113,12 +117,15 @@ wooden tower, a water basin and a lava crucible).
 | `WASD` / arrows | Move the camera (`Shift` = faster) |
 | Middle mouse drag | Move the camera |
 | `Home` | Back to the starting point |
-| Left mouse | Paint selected material |
+| Left mouse | Use the current tool: paint, heat or cool |
 | Right mouse | Erase |
 | Mouse wheel | Brush size |
 | `1`–`5` | Sand / water / stone / oil / wood |
 | `6`–`0` | Fire / lava / ice / steam / smoke |
-| `Q` / `E` | Previous / next material (all, including dirt, coal, basalt…) |
+| `Q` / `E` | Previous / next material (all, including dirt, coal, basalt…); choosing a material switches to painting |
+| `H` | Heat brush |
+| `J` | Cool brush |
+| `I` | Pixel inspector on/off (on at start) |
 | `T` | Heat view (temperature map) |
 | `Space` | Pause / resume |
 | `.` | Single step while paused |
@@ -151,7 +158,8 @@ cmake --build build-asan && ./build-asan/px_tests && ./build-asan/pixel_stress
 ```
 src/core/     material registry, chunk storage, world, simulator (no dependencies)
 src/world/    seeded world generation, demo scenes
-src/render/   World -> ARGB pixel buffer (no SDL)
+src/sandbox/  sandbox tools: heat/cool brushes, pixel inspector (no rendering)
+src/render/   World -> ARGB pixel buffer, built-in 3x5 font (no SDL)
 src/app/      SDL2 window, input, fixed 60 Hz timestep
 tools/        headless benchmark / snapshot tool, stress test
 tests/        unit tests (tiny built-in harness, run via CTest)
@@ -168,7 +176,9 @@ Each step (`px::step`, fixed at 60 per second):
 3. Each cell first updates its state, if it can change at all (room-temperature
    sand and water skip this entirely):
    - heat sources reset to their temperature; cells off ambient exchange heat
-     with their 4 neighbours, conserving the total;
+     with their 4 neighbours, conserving the total. A heat source cooled below
+     its low-transition point stops re-heating and transforms (lava hardens,
+     fire goes out); ordinary conduction never cools one that far;
    - reactions with a neighbour, temperature transitions, lifetime countdown
      and emission (fire throwing flames) may turn it into something else.
 4. Then it runs the movement rule for its phase:
@@ -198,6 +208,27 @@ Each step (`px::step`, fixed at 60 per second):
 Chunking is purely an optimisation: tests check that the chunked simulation
 produces exactly the same materials and temperatures as updating every cell
 every step, including with fire, lava, steam and ice.
+
+### Sandbox tools
+
+`src/sandbox/tools.hpp` holds the tools, independent of any window, so they
+are tested headless like the simulation.
+
+- **Heat and cool brushes** (`apply_thermal_brush`) pull temperatures toward a
+  target (3000 °C or −100 °C), closing a share of the gap over the inner half
+  of the brush and fading to the rim. They work on anything, air included,
+  and never overshoot. The app applies them once per simulation step while
+  the button is held, so the effect does not depend on frame rate (and they
+  pause with the simulation). Everything else follows from the materials'
+  own rules: rock melts into lava, lava hardens, water boils or freezes, fuel
+  ignites, fire goes out.
+- **Pixel inspector** (`inspect` / `describe`): material and, for a derived
+  material, what it derives from; position; whether it is simulating;
+  temperature; density and conductivity; health; its transitions (above /
+  below which temperature it turns into what, and how fast); lifetime or
+  motion. The app draws it with a built-in 3×5 pixel font
+  (`src/render/text.hpp`), at the top left (or top right when the cursor is
+  there).
 
 ### Wrapping worlds
 

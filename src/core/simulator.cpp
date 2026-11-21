@@ -398,7 +398,19 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
   // A source already at its temperature with no heat flowing has nothing to do
   // and may sleep: a neighbour cooling or changing wakes it again. Keeping every
   // source awake made a buried lava pool cost CPU forever.
-  if (p.emits_heat && c.temperature(i) != p.spawn_temp) {
+  //
+  // A source only sustains itself above its low-transition threshold: cooled
+  // below it (a cooling brush, a lone drop surrounded by ice), it stops
+  // re-heating and its low transition applies (lava hardens, fire goes out).
+  // Ordinary conduction cannot pull a source that far between two updates.
+  if (p.emits_heat && p.has_low && c.temperature(i) <= p.low_temp) {
+    // Released: transform now, before hot neighbours can re-heat it this step.
+    if (rng.chance(p.low_chance)) {
+      transform(ctx, x, y, p.low_to, 0, rng);
+      return StateResult::Transformed;
+    }
+    keep_awake = true;
+  } else if (p.emits_heat && c.temperature(i) != p.spawn_temp) {
     c.set_temperature(i, p.spawn_temp);
     ctx.world.wake(x, y);
   }

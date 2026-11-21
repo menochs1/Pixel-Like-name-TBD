@@ -9,6 +9,7 @@
 #include "core/rng.hpp"
 #include "core/simulator.hpp"
 #include "core/world.hpp"
+#include "sandbox/tools.hpp"
 #include "test_framework.hpp"
 
 namespace {
@@ -265,7 +266,8 @@ TEST(damage_wears_cells_down_until_they_break) {
   CHECK_EQ(w.health(20, 63), 255);
 }
 
-// Random painting of every material and random temperature spikes, on walled
+// Random painting of every material, random temperature spikes and heat/cool
+// brushes, on walled
 // and wrapping worlds: skipping sleeping cells must give exactly the same world
 // as updating every cell. This found a heat-exchange cell that slept through
 // its turn.
@@ -296,6 +298,12 @@ TEST(chunked_simulation_matches_full_updates_under_random_edits) {
           a.set_temperature(tx, ty, t);
           b.set_temperature(tx, ty, t);
         }
+      }
+      if (s % 50 < 15) {  // a heat or cool brush held for a while (melting, quenching)
+        const int bx = (seed * 37 + s / 50 * 53) % a.width(), by = 30 + (s / 50 * 17) % 60;
+        const px::ThermalBrush& brush = (s / 50) % 2 ? px::kCoolBrush : px::kHeatBrush;
+        px::apply_thermal_brush(a, bx, by, 6, brush);
+        px::apply_thermal_brush(b, bx, by, 6, brush);
       }
       px::step(a);
       b.wake_all();

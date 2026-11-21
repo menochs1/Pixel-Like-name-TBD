@@ -285,6 +285,9 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.color = {104, 100, 112};
     d.color_variation = 14;
     d.conductivity = 0.35f;
+    d.high_temp = 1500;  // melts (only a heating brush gets rock this hot)
+    d.high_to = "lava";
+    d.high_chance = 0.05f;
     d.durability = 200;
     ids.stone = add(d);
   }
@@ -364,6 +367,8 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.decay_chance = 0.35f;
     d.emits = "flame";
     d.emit_chance = 0.35f;
+    d.low_temp = 300;  // cooled this far, it goes out
+    d.low_to = "smoke";
     ids.fire = add(d);
   }
   {
@@ -428,6 +433,9 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.conductivity = 0.5f;
     d.spawn_temperature = 1200;
     d.emits_heat = true;
+    d.low_temp = 600;  // cooled this far, it hardens back into rock
+    d.low_to = "stone";
+    d.low_chance = 0.5f;
     ids.lava = add(d);
   }
   {

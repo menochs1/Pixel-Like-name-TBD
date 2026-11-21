@@ -5,12 +5,16 @@
 //   WASD / arrows  move the camera (hold Shift to move faster)
 //   Middle mouse   drag to move the camera
 //   Home           back to the starting point
-//   Left mouse     paint the selected material
+//   Left mouse     use the current tool (paint, heat or cool)
 //   Right mouse    erase
 //   Mouse wheel    brush size
 //   1 sand   2 water   3 stone   4 oil   5 wood
 //   6 fire   7 lava    8 ice     9 steam 0 smoke
 //   Q / E          previous / next material (all of them, incl. dirt, coal...)
+//                  (choosing a material switches back to painting)
+//   H              heat brush: melts rock, boils water, lights fuel
+//   J              cool brush: freezes water, hardens lava, puts out fire
+//   I              toggle the pixel inspector (what is under the cursor)
 //   T              toggle heat view (temperature map)
 //   Space          pause / resume
 //   . (period)     single step while paused
@@ -45,6 +49,8 @@
 #include "core/simulator.hpp"
 #include "core/world.hpp"
 #include "render/pixel_renderer.hpp"
+#include "render/text.hpp"
+#include "sandbox/tools.hpp"
 #include "world/demo_scene.hpp"
 #include "world/world_gen.hpp"
 
@@ -91,13 +97,13 @@ void paint_line(px::World& world, int x0, int y0, int x1, int y1, int radius, px
   }
 }
 
-void draw_brush_outline(std::uint32_t* pixels, int w, int h, int cx, int cy, int r) {
+void draw_brush_outline(std::uint32_t* pixels, int w, int h, int cx, int cy, int r, std::uint32_t color) {
   const int segments = std::max(16, r * 6);
   for (int i = 0; i < segments; ++i) {
     const double a = 2.0 * 3.14159265358979 * i / segments;
     const int x = cx + static_cast<int>(std::lround(std::cos(a) * r));
     const int y = cy + static_cast<int>(std::lround(std::sin(a) * r));
-    if (x >= 0 && y >= 0 && x < w && y < h) pixels[y * w + x] = 0xFFE8E8F0U;
+    if (x >= 0 && y >= 0 && x < w && y < h) pixels[y * w + x] = color;
   }
 }
 
@@ -177,6 +183,17 @@ int main(int argc, char** argv) {
   std::vector<std::uint32_t> pixels(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
 
   Brush brush{ids.sand, 6};
+  enum class Tool { Paint, Heat, Cool };
+  Tool tool = Tool::Paint;
+  bool show_inspector = true;
+  auto tool_name = [&]() -> std::string {
+    switch (tool) {
+      case Tool::Heat: return "heat brush";
+      case Tool::Cool: return "cool brush";
+      case Tool::Paint: break;
+    }
+    return "paint " + materials.def(brush.material).name;
+  };
   bool running = true;
   bool paused = false;
   bool single_step = false;
@@ -230,6 +247,7 @@ int main(int argc, char** argv) {
     cam_y = std::clamp(cam_y, 0.0, static_cast<double>(world_ptr->height() - h));
   };
   auto cycle_material = [&](int dir) {
+    tool = Tool::Paint;
     const int n = static_cast<int>(materials.size());
     int m = brush.material;
     do m = (m + dir + n) % n;
@@ -260,16 +278,19 @@ int main(int argc, char** argv) {
             case SDLK_ESCAPE: running = false; break;
             case SDLK_SPACE: paused = !paused; break;
             case SDLK_PERIOD: single_step = true; break;
-            case SDLK_1: brush.material = ids.sand; break;
-            case SDLK_2: brush.material = ids.water; break;
-            case SDLK_3: brush.material = ids.stone; break;
-            case SDLK_4: brush.material = ids.oil; break;
-            case SDLK_5: brush.material = ids.wood; break;
-            case SDLK_6: brush.material = ids.fire; break;
-            case SDLK_7: brush.material = ids.lava; break;
-            case SDLK_8: brush.material = ids.ice; break;
-            case SDLK_9: brush.material = ids.steam; break;
-            case SDLK_0: brush.material = ids.smoke; break;
+            case SDLK_1: brush.material = ids.sand; tool = Tool::Paint; break;
+            case SDLK_2: brush.material = ids.water; tool = Tool::Paint; break;
+            case SDLK_3: brush.material = ids.stone; tool = Tool::Paint; break;
+            case SDLK_4: brush.material = ids.oil; tool = Tool::Paint; break;
+            case SDLK_5: brush.material = ids.wood; tool = Tool::Paint; break;
+            case SDLK_6: brush.material = ids.fire; tool = Tool::Paint; break;
+            case SDLK_7: brush.material = ids.lava; tool = Tool::Paint; break;
+            case SDLK_8: brush.material = ids.ice; tool = Tool::Paint; break;
+            case SDLK_9: brush.material = ids.steam; tool = Tool::Paint; break;
+            case SDLK_0: brush.material = ids.smoke; tool = Tool::Paint; break;
+            case SDLK_h: tool = Tool::Heat; break;
+            case SDLK_j: tool = Tool::Cool; break;
+            case SDLK_i: show_inspector = !show_inspector; break;
             case SDLK_q: cycle_material(-1); break;
             case SDLK_e: cycle_material(1); break;
             case SDLK_t: show_heat = !show_heat; break;
@@ -290,7 +311,8 @@ int main(int argc, char** argv) {
             pan_x = e.button.x;
             pan_y = e.button.y;
           }
-          if (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT) {
+          // Painting and erasing; the thermal brushes act once per simulation step instead.
+          if ((e.button.button == SDL_BUTTON_LEFT && tool == Tool::Paint) || e.button.button == SDL_BUTTON_RIGHT) {
             // SDL already reports mouse events in logical (world) coordinates
             // because the renderer has a logical size set.
             stroke_active = false;
@@ -305,8 +327,10 @@ int main(int argc, char** argv) {
             pan_y = e.motion.y;
             clamp_camera();
           }
-          if (e.motion.state & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK)) {
-            stroke_to(e.motion.x, e.motion.y, (e.motion.state & SDL_BUTTON_LMASK) == 0);
+          if (e.motion.state & SDL_BUTTON_RMASK) {
+            stroke_to(e.motion.x, e.motion.y, true);
+          } else if ((e.motion.state & SDL_BUTTON_LMASK) && tool == Tool::Paint) {
+            stroke_to(e.motion.x, e.motion.y, false);
           }
           break;
         case SDL_MOUSEBUTTONUP:
@@ -341,8 +365,10 @@ int main(int argc, char** argv) {
     const Uint32 buttons = SDL_GetMouseState(&wx, &wy);
     int mx = 0, my = 0;
     to_view(wx, wy, mx, my);
-    if (stroke_active && !painted_this_frame && (buttons & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK))) {
-      stroke_to(mx, my, (buttons & SDL_BUTTON_LMASK) == 0);
+    const bool erasing = (buttons & SDL_BUTTON_RMASK) != 0;
+    const bool using_tool = (buttons & SDL_BUTTON_LMASK) != 0 && !erasing;
+    if (stroke_active && !painted_this_frame && (erasing || (using_tool && tool == Tool::Paint))) {
+      stroke_to(mx, my, erasing);
     }
 
     // Fixed-timestep simulation, limited to the chunks around the camera.
@@ -361,6 +387,10 @@ int main(int argc, char** argv) {
     single_step = false;
     double frame_sim_ms = 0.0;
     for (int s = 0; s < steps; ++s) {
+      if (using_tool && tool != Tool::Paint) {  // once per step: independent of frame rate
+        px::apply_thermal_brush(world, mx + cam_ix(), my + cam_iy(), brush.radius,
+                                tool == Tool::Heat ? px::kHeatBrush : px::kCoolBrush);
+      }
       const auto t0 = clock::now();
       last_stats = px::step(world, region);
       const double step_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
@@ -378,7 +408,17 @@ int main(int argc, char** argv) {
     if (show_heat) renderer.render_temperature(world, pixels.data(), w, view);
     else renderer.render(world, pixels.data(), w, view);
     if (show_dirty) renderer.draw_dirty_rects(world, pixels.data(), w, view);
-    draw_brush_outline(pixels.data(), w, h, mx, my, brush.radius);
+    const std::uint32_t outline = tool == Tool::Heat ? 0xFFFF7040U : (tool == Tool::Cool ? 0xFF60C0FFU : 0xFFE8E8F0U);
+    draw_brush_outline(pixels.data(), w, h, mx, my, brush.radius, outline);
+    if (show_inspector) {
+      std::vector<std::string> lines = px::describe(world, px::inspect(world, mx + cam_ix(), my + cam_iy()));
+      lines.insert(lines.begin(), tool_name() + "  r" + std::to_string(brush.radius) + (paused ? "  paused" : ""));
+      int pw = 0;
+      for (const std::string& line : lines) pw = std::max(pw, px::text_width(line) + 6);
+      // Top-left, unless the cursor is there: then top-right.
+      const int px0 = (mx < pw + 8 && my < static_cast<int>(lines.size()) * px::kLineHeight + 12) ? w - pw - 2 : 2;
+      px::draw_text_panel(pixels.data(), w, w, h, px0, 2, lines);
+    }
     SDL_UpdateTexture(texture, nullptr, pixels.data(), w * static_cast<int>(sizeof(std::uint32_t)));
     SDL_RenderClear(sdl_renderer);
     SDL_RenderCopy(sdl_renderer, texture, nullptr, nullptr);
@@ -395,7 +435,7 @@ int main(int argc, char** argv) {
       char title[320];
       std::snprintf(title, sizeof(title),
                     "Pixel Sandbox | %s | brush %d | %.0f fps | sim %.2f ms | active chunks %d/%d%s%s%s",
-                    materials.def(brush.material).name.c_str(), brush.radius, frames / title_timer,
+                    tool_name().c_str(), brush.radius, frames / title_timer,
                     sim_steps ? sim_ms_sum / sim_steps : 0.0, last_stats.active_chunks,
                     world.width_chunks() * world.height_chunks(), where, show_heat ? " | HEAT VIEW" : "",
                     paused ? " | PAUSED" : "");

@@ -42,9 +42,10 @@ Implement in this order. Progress as of 2026-11-21: ✅ done · 🟡 partly done
 4. Deterministic world generation — 🟡 Partly done: seeded, chunk-independent
    generation with biomes, caves, pools, deposits and a wrapping seam is done.
    Save/load is not started.
-5. Sandbox tools (spawn, erase, heat/cool, inspect pixel properties) — 🟡
-   Partly done: spawn and erase brushes, a heat view and an active-region view.
-   Not yet done: a heat/cool tool and a pixel inspector.
+5. Sandbox tools (spawn, erase, heat/cool, inspect pixel properties) — ✅
+   Done: paint/erase brushes for every material, heat and cool brushes (melt
+   rock, harden lava, boil, freeze, ignite, extinguish), a pixel inspector
+   showing each pixel's properties, a heat view and an active-region view.
 6. Character controller — ⬜ Not started.
 7. Lighting — ⬜ Not started.
 8. Optional combat and multiplayer — ⬜ Not started.
