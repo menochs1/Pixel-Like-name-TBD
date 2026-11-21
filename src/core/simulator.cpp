@@ -12,7 +12,7 @@ namespace {
 constexpr int kMaxFallSpeed = 8;  // velocity units; fall distance per step is 1 + v / 3
 // A liquid whose sideways flow has reversed about 2 * kSettleCount times without
 // it dropping is "settled": it stops wandering across a flat surface (see
-// update_liquid). The count is stored as a negative velocity_y, so it must fit
+// update_liquid). The count is stored as a negative fall speed, so it must fit
 // in an int8; each reversal counts with probability 1/2 to double its reach.
 constexpr int kSettleCount = 120;
 // Fraction of a temperature gap closed per neighbour pair per exchange. Heat is
@@ -20,14 +20,10 @@ constexpr int kSettleCount = 120;
 // step; exchanging from both sides every step cost twice as much for the same
 // diffusion.
 constexpr float kHeatRate = 0.25f;
-constexpr int kMinTemp = -273;
-constexpr int kMaxTemp = 30000;
-
 struct StepContext {
   World& world;
   const MaterialRegistry& materials;
   std::uint32_t tick;
-  std::uint8_t clock;  // 1..255, never 0, so fresh cells (clock 0) never look "already updated"
   StepStats& stats;
 };
 
@@ -74,13 +70,10 @@ void swap_cells(StepContext& ctx, int x0, int y0, int x1, int y1) {
   const int ia = World::local_index(x0, y0);
   const int ib = World::local_index(x1, y1);
   std::swap(a.material[ia], b.material[ib]);
-  std::swap(a.temperature[ia], b.temperature[ib]);
-  std::swap(a.life[ia], b.life[ib]);
-  std::swap(a.velocity_y[ia], b.velocity_y[ib]);
-  std::swap(a.velocity_x[ia], b.velocity_x[ib]);
-  std::swap(a.shade[ia], b.shade[ib]);
-  a.clock[ia] = ctx.clock;
-  b.clock[ib] = ctx.clock;
+  std::swap(a.thermal[ia], b.thermal[ib]);  // temperature and shade travel together
+  std::swap(a.motion[ia], b.motion[ib]);    // fall speed / flow, or lifetime
+  a.mark_updated(ia, ctx.tick);
+  b.mark_updated(ib, ctx.tick);
   w.wake(x0, y0);
   w.wake(x1, y1);
   ++ctx.stats.cells_moved;
@@ -94,14 +87,13 @@ void transform(StepContext& ctx, int x, int y, MaterialId to, std::uint16_t life
   const int i = World::local_index(x, y);
   const MaterialProps& p = ctx.materials.props(to);
   c.material[i] = to;
-  if (p.has_spawn_temp) c.temperature[i] = p.spawn_temp;
+  if (p.has_spawn_temp) c.set_temperature(i, p.spawn_temp);
   if (life == 0 && p.lifetime_max > 0) {
     life = static_cast<std::uint16_t>(p.lifetime_min + rng.next() % (p.lifetime_max - p.lifetime_min + 1U));
   }
-  c.life[i] = p.lifetime_max > 0 || life > 0 ? life : 0;
-  c.velocity_y[i] = 0;
-  c.velocity_x[i] = 0;
-  c.clock[i] = ctx.clock;
+  // At rest, or with its new lifetime (never both: see MaterialProps::uses_motion).
+  c.motion[i] = p.uses_motion ? 0 : life;
+  c.mark_updated(i, ctx.tick);
   ctx.world.wake(x, y);
 }
 
@@ -130,11 +122,11 @@ bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
   Chunk& c = w.chunk_for(x, y);
   const int lx = x & kChunkMask, ly = y & kChunkMask;
   const int i = Chunk::index(lx, ly);
-  int t = c.temperature[i];
+  int t = c.temperature(i);
   bool flowed = false;
 
   auto pair = [&](Chunk& nc, int ni) {
-    const int tn = nc.temperature[ni];
+    const int tn = nc.temperature(ni);
     if (tn == t) return;
     const float nk = ctx.materials.props(nc.material[ni]).conductivity;
     if (nk <= 0.0f) return;  // insulator
@@ -146,7 +138,7 @@ bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
     if (delta == 0 && (tn - t >= 2 || tn - t <= -2)) delta = tn > t ? 1 : -1;
     if (delta == 0) return;
     t += delta;
-    nc.temperature[ni] = static_cast<Temperature>(std::clamp(tn - delta, kMinTemp, kMaxTemp));
+    nc.set_temperature(ni, tn - delta);  // clamps
     flowed = true;
   };
 
@@ -167,7 +159,7 @@ bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
       pair(w.chunk_for(nx, ny), World::local_index(nx, ny));
     }
   }
-  c.temperature[i] = static_cast<Temperature>(std::clamp(t, kMinTemp, kMaxTemp));
+  c.set_temperature(i, t);
   // One 5x5 wake covers the 3x3 around this cell and around every neighbour
   // whose temperature changed; waking each separately cost up to 5 wakes per
   // cell and was the largest single cost in hot scenes.
@@ -180,22 +172,18 @@ void update_air(StepContext& ctx, int x, int y) {
   Chunk& c = ctx.world.chunk_for(x, y);
   const int i = World::local_index(x, y);
   const bool flowed = heat_turn(ctx, x, y) && exchange_heat(ctx, x, y, ctx.materials.props(kEmpty).conductivity);
-  const int t = c.temperature[i];
+  const int t = c.temperature(i);
   int relax = (kAmbient - t) / 8;
   if (relax == 0) relax = (t > kAmbient) ? -1 : (t < kAmbient ? 1 : 0);
-  c.temperature[i] = static_cast<Temperature>(t + relax);
+  c.set_temperature(i, t + relax);
   if (relax != 0 && !flowed) ctx.world.wake(x, y);  // a heat flow already woke the 5x5
 }
 
 // ------------------------------------------------------------------ movement
 
-void set_velocity(World& w, int x, int y, int v) {
-  w.chunk_for(x, y).velocity_y[World::local_index(x, y)] = static_cast<std::int8_t>(v);
-}
+void set_velocity(World& w, int x, int y, int v) { w.chunk_for(x, y).set_fall_speed(World::local_index(x, y), v); }
 
-void set_flow(World& w, int x, int y, int d) {
-  w.chunk_for(x, y).velocity_x[World::local_index(x, y)] = static_cast<std::int8_t>(d);
-}
+void set_flow(World& w, int x, int y, int d) { w.chunk_for(x, y).set_flow(World::local_index(x, y), d); }
 
 /// Falls straight down with gravity acceleration. Returns the final y.
 /// Free fall through empty space or gas is a single swap to the landing cell;
@@ -239,7 +227,7 @@ bool update_powder(StepContext& ctx, int x, int y, MaterialId m, int velocity, R
   return slide_diagonal(ctx, x, y, m, rng.direction()) != 0;
 }
 
-/// Liquids remember the horizontal direction they last flowed in (velocity_x)
+/// Liquids remember the horizontal direction they last flowed in (Chunk::flow)
 /// and keep going that way until blocked, like a current. Choosing a random
 /// side every step instead turns flow into a random walk: water creeps and
 /// jitters rather than rushing out and levelling.
@@ -247,7 +235,7 @@ bool update_powder(StepContext& ctx, int x, int y, MaterialId m, int velocity, R
 /// Settling: a cell on top of a full liquid layer always has room beside it, so
 /// a partial top layer would shuffle sideways forever and never sleep. Each time
 /// a cell's sideways flow reverses without heading for a drop, it counts up (as a
-/// negative velocity_y); falling, sliding down or flowing towards a drop resets
+/// negative fall speed); falling, sliding down or flowing towards a drop resets
 /// it. Only reversals count: a cell crossing a long, slightly higher terrace
 /// keeps its heading until it finds the edge, while one in a partial top layer
 /// bounces back and forth. Counting every move instead freezes a lake as a gentle
@@ -255,10 +243,10 @@ bool update_powder(StepContext& ctx, int x, int y, MaterialId m, int velocity, R
 /// lighter liquid, so a level surface goes still while a breached container
 /// still drains.
 bool update_liquid(StepContext& ctx, int x, int y, MaterialId m, int velocity, Rng& rng) {
-  const int prev = ctx.world.chunk_for(x, y).velocity_x[World::local_index(x, y)];
+  const int prev = ctx.world.chunk_for(x, y).flow(World::local_index(x, y));
   const int first = prev != 0 ? prev : rng.direction();
 
-  if (fall(ctx, x, y, m, velocity) != y) return true;  // velocity_x travelled with the cell
+  if (fall(ctx, x, y, m, velocity) != y) return true;  // the flow direction travelled with the cell
   if (const int d = slide_diagonal(ctx, x, y, m, first); d != 0) {
     set_flow(ctx.world, x + d, y + 1, d);
     set_velocity(ctx.world, x + d, y + 1, 0);  // it went down: no longer settling
@@ -382,14 +370,14 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
   // A source already at its temperature with no heat flowing has nothing to do
   // and may sleep: a neighbour cooling or changing wakes it again. Keeping every
   // source awake made a buried lava pool cost CPU forever.
-  if (p.emits_heat && c.temperature[i] != p.spawn_temp) {
-    c.temperature[i] = p.spawn_temp;
+  if (p.emits_heat && c.temperature(i) != p.spawn_temp) {
+    c.set_temperature(i, p.spawn_temp);
     ctx.world.wake(x, y);
   }
   // Off-turn cells need not stay awake for heat: any temperature change wakes
   // the 3x3 (or 5x5) around it, so the neighbour whose turn comes next is awake
   // and handles the pair.
-  if (c.temperature[i] != kAmbient && heat_turn(ctx, x, y) && exchange_heat(ctx, x, y, p.conductivity)) {
+  if (c.temperature(i) != kAmbient && heat_turn(ctx, x, y) && exchange_heat(ctx, x, y, p.conductivity)) {
     keep_awake = true;
   }
 
@@ -401,7 +389,7 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
   }
 
   // Temperature transitions (burning, boiling, condensing, melting, freezing).
-  const Temperature t = c.temperature[i];
+  const Temperature t = c.temperature(i);
   if (p.has_high && t >= p.high_temp) {
     if (rng.chance(p.high_chance)) {
       std::uint16_t life = 0;
@@ -420,8 +408,9 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
   }
 
   // Limited lifetime.
-  if (c.life[i] > 0) {
-    if (--c.life[i] == 0) {
+  if (!p.uses_motion && c.life(i) > 0) {
+    c.set_life(i, static_cast<std::uint16_t>(c.life(i) - 1));
+    if (c.life(i) == 0) {
       transform(ctx, x, y, rng.chance(p.decay_chance) ? p.decay_to : kEmpty, 0, rng);
       return StateResult::Transformed;
     }
@@ -438,7 +427,7 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
       const int ey = r < 2 ? y - 1 : y;
       if (ctx.world.get(ex, ey) == kEmpty) {
         transform(ctx, ex, ey, p.emits, 0, rng);
-        ctx.world.chunk_for(ex, ey).clock[World::local_index(ex, ey)] = 0;  // may move this step
+        ctx.world.chunk_for(ex, ey).clear_updated(World::local_index(ex, ey));  // may move this step
       }
     }
   }
@@ -449,21 +438,21 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
 void update_cell(StepContext& ctx, int x, int y) {
   Chunk& c = ctx.world.chunk_for(x, y);
   const int i = World::local_index(x, y);
-  if (c.clock[i] == ctx.clock) return;
+  if (c.was_updated(i, ctx.tick)) return;
   const MaterialId m = c.material[i];
   if (m == kEmpty) {
-    if (c.temperature[i] != kAmbient) {
-      c.clock[i] = ctx.clock;
+    if (c.temperature(i) != kAmbient) {
+      c.mark_updated(i, ctx.tick);
       update_air(ctx, x, y);
     }
     return;
   }
-  c.clock[i] = ctx.clock;
+  c.mark_updated(i, ctx.tick);
 
   const MaterialProps& p = ctx.materials.props(m);
   Rng rng{ctx.world.seed(), x, y, ctx.tick};
   bool keep_awake = false;
-  if (p.active_at_ambient || c.temperature[i] != kAmbient || c.life[i] != 0) {
+  if (p.active_at_ambient || c.temperature(i) != kAmbient || (!p.uses_motion && c.life(i) != 0)) {
     const StateResult r = update_state(ctx, x, y, m, p, rng);
     if (r == StateResult::Transformed) return;
     keep_awake = r == StateResult::KeepAwake;
@@ -472,10 +461,10 @@ void update_cell(StepContext& ctx, int x, int y) {
   bool moved = false;
   switch (p.phase) {
     case Phase::Powder:
-      moved = update_powder(ctx, x, y, m, c.velocity_y[i], rng);
+      moved = update_powder(ctx, x, y, m, c.fall_speed(i), rng);
       break;
     case Phase::Liquid:
-      moved = update_liquid(ctx, x, y, m, c.velocity_y[i], rng);
+      moved = update_liquid(ctx, x, y, m, c.fall_speed(i), rng);
       break;
     case Phase::Gas:
       moved = update_gas(ctx, x, y, m, p, rng);
@@ -496,7 +485,7 @@ StepStats step_impl(World& world, const ChunkRegion* region) {
   StepStats stats;
   world.advance_tick();
   const std::uint32_t tick = world.tick();
-  StepContext ctx{world, world.materials(), tick, static_cast<std::uint8_t>(tick % 255U + 1U), stats};
+  StepContext ctx{world, world.materials(), tick, stats};
 
   const int wc = world.width_chunks();
   const int hc = world.height_chunks();

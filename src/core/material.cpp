@@ -84,6 +84,18 @@ void MaterialRegistry::finalize() {
     p.decay_chance = to_chance(d.decay_chance);
     p.emits = require(d.emits);
     p.emit_chance = to_chance(d.emit_chance);
+    p.uses_motion = d.phase == Phase::Powder || d.phase == Phase::Liquid;
+    if (p.uses_motion && p.lifetime_max > 0) {
+      throw std::invalid_argument("MaterialRegistry: '" + d.name +
+                                  "' is a powder or liquid with a lifetime; only solids and gases can expire");
+    }
+  }
+  // A burn_time is a lifetime given to the transition target, so the same rule applies to it.
+  for (std::size_t i = 0; i < defs_.size(); ++i) {
+    if (props_[i].has_high && props_[i].burn_time > 0 && props_[props_[i].high_to].uses_motion) {
+      throw std::invalid_argument("MaterialRegistry: '" + defs_[i].name +
+                                  "' has a burn_time but turns into a powder or liquid, which cannot expire");
+    }
   }
   // After reactions are known (has_reactions), flag materials that need state
   // updates even at ambient temperature.

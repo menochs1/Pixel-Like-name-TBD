@@ -65,7 +65,9 @@ struct MaterialDef {
   /// transition, e.g. how long burning wood stays on fire. 0 = use the target's own.
   std::uint16_t burn_time = 0;
 
-  // Limited lifetime (fire, flame, smoke). 0 = lives forever.
+  // Limited lifetime (fire, flame, smoke). 0 = lives forever. Only solids and
+  // gases may have one: powders and liquids use that per-cell storage for
+  // their motion (see Chunk::motion), and finalize() rejects the combination.
   std::uint16_t lifetime_min = 0, lifetime_max = 0;
   std::string decay_to;         // what it may leave behind ("" = empty)
   float decay_chance = 1.0f;    // chance to leave decay_to instead of empty
@@ -106,6 +108,9 @@ struct MaterialProps {
   /// simulation state: the renderer animates it. Lets the
   /// simulator skip all state logic for e.g. room-temperature sand and water.
   bool active_at_ambient = false;
+  /// Powders and liquids: the cell's motion field holds fall speed and flow
+  /// direction. Everything else: it holds the remaining lifetime.
+  bool uses_motion = false;
 };
 
 /// When `a` touches `b`, with `chance` per step, `a` becomes `a_to` and `b`

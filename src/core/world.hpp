@@ -65,9 +65,10 @@ class World {
   void set(int x, int y, MaterialId material);
 
   Temperature temperature(int x, int y) const {
-    return in_bounds(x, y) ? chunk_for(x, y).temperature[local_index(x, y)] : kAmbient;
+    return in_bounds(x, y) ? chunk_for(x, y).temperature(local_index(x, y)) : kAmbient;
   }
-  void set_temperature(int x, int y, Temperature t);
+  /// Clamped to the storable range, Chunk::kMinTemp..Chunk::kMaxTemp.
+  void set_temperature(int x, int y, int t);
 
   void fill_rect(int x, int y, int w, int h, MaterialId material);
   /// Fills a disc. `coverage` in (0, 1] places material in that fraction of cells

@@ -117,13 +117,13 @@ void PixelRenderer::render(const World& world, std::uint32_t* pixels, int pitch,
       for (int k = 0; k < n; ++k) {
         const int i = base + k;
         const MaterialId m = c.material[i];
-        std::uint32_t shade = c.shade[i];
+        std::uint32_t shade = c.shade(i);
         if (flicker_[m]) {
           shade = hash32(static_cast<std::uint32_t>(wx + k) * 0x9E3779B1U ^ static_cast<std::uint32_t>(wy) * 0x85EBCA77U ^
                          tick * 0xC2B2AE3DU);
         }
         const std::uint32_t col = palette_[m][shade & (kShades - 1)];
-        row[sx + k] = m == kEmpty ? col : glow(col, c.temperature[i]);
+        row[sx + k] = m == kEmpty ? col : glow(col, c.temperature(i));
       }
     });
   }
@@ -143,7 +143,7 @@ void PixelRenderer::render_temperature(const World& world, std::uint32_t* pixels
       const Chunk& c = world.chunk_for(wx, wy);
       const int base = World::local_index(wx, wy);
       for (int k = 0; k < n; ++k) {
-        const int t = std::clamp<int>(c.temperature[base + k], kHeatLutMin, kHeatLutMax);
+        const int t = std::clamp<int>(c.temperature(base + k), kHeatLutMin, kHeatLutMax);
         std::uint32_t col = heat_lut_[static_cast<std::size_t>(t - kHeatLutMin)];
         if (c.material[base + k] != kEmpty) col |= 0x00202020U;  // lift solids/fluids a little
         row[sx + k] = col;

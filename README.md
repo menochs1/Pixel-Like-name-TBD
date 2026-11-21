@@ -253,8 +253,27 @@ registry.finalize();
 Only the first material named in a reaction looks for partners, so name the
 rarer or more active one first.
 
-A per-cell clock byte stops a cell that has already moved this step from being
-updated again.
+A per-cell bit marks cells that have already moved or updated this step, so
+nothing moves twice. The bits are stamped with the step number and cleared on
+first use in a new step, so chunks a step never touches cost nothing.
+
+### Cell layout
+
+Cells are stored per chunk as a structure of arrays, packed by what each field
+really needs (`src/core/chunk.hpp`):
+
+| Field | Bits | Holds |
+| --- | --- | --- |
+| material | 16 | material id |
+| thermal | 16 | temperature (12 bits, −273…3822 °C) + colour shade (4 bits) |
+| motion | 16 | powders/liquids: fall speed or settle count + flow direction; everything else: remaining lifetime |
+| updated | 1 | already moved this step |
+
+No material needs both motion and a lifetime, so they share a field. The
+registry rejects a powder or liquid with a lifetime. Simulation code goes
+through accessors (`temperature()`, `flow()`, `life()`…), so the packing stays
+in one place. Packing cut memory from 10 to ~6 bytes per cell with no
+measurable change in speed.
 
 ## Performance
 
@@ -266,7 +285,7 @@ Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
 | Mean step | ~5.0 ms |
 | p95 step | ~8 ms |
 | Cells scanned per step | ~166k |
-| Memory | 10 bytes/cell (~40 KiB per chunk; 10M cells ≈ 100 MiB) |
+| Memory | 6 bytes + 1 bit per cell (~24.6 KiB per chunk; 10M cells ≈ 59 MiB) |
 
 `pixel_stress` also covers a small world fully on fire (p95 3.5 ms) and lava
 raining into a lake (p95 3.1 ms). Timings vary run to run on shared machines by
@@ -308,7 +327,7 @@ and steam dragged across the whole view for 50 s) on a 2.1 GHz server core:
   stone in 10 seconds. Temperatures are whole degrees and a 1° gap does not
   flow, so buried layers can settle a degree per layer above ambient.
 - Steam and smoke drift as scattered particles rather than billowing clouds.
-- The world is still one fixed grid of chunks held in memory (60 MiB for the
+- The world is still one fixed grid of chunks held in memory (37 MiB for the
   app world). Generation is already per chunk, so save/load and then chunk
   streaming are the next parts of roadmap step 3.
 - Only horizontal wrapping; the top and bottom are solid.

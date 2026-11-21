@@ -357,8 +357,8 @@ void WorldGenerator::generate_chunk(World& world, int cx, int cy) const {
       const MaterialProps& p = reg.props(m);
       const int i = Chunk::index(lx, ly);
       c.material[i] = m;
-      c.temperature[i] = p.spawn_temp;
-      c.shade[i] = static_cast<std::uint8_t>(cell_hash(world.seed(), x, y, 0) & 0x0F);  // as World::set
+      c.set_temperature(i, p.spawn_temp);
+      c.set_shade(i, cell_hash(world.seed(), x, y, 0) & 0x0F);  // as World::set
       // Wake only what can move or change. Settled liquid and sand go back to
       // sleep after one step; solid rock and air never cost anything.
       if (p.phase == Phase::Powder || p.phase == Phase::Liquid || p.phase == Phase::Gas || p.active_at_ambient ||

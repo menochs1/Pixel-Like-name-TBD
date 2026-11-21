@@ -7,7 +7,7 @@
 // 2. Randomised editing fuzz: brush strokes of every size (including far out of
 //    bounds), clears and scene rebuilds interleaved with steps, checking after
 //    every step that material is conserved and per-cell data stays valid.
-// 3. A long run past the 8-bit update-clock wraparound.
+// 3. A long run (tens of thousands of steps) with periodic pours.
 // Exits non-zero if any invariant breaks. Build with sanitizers for memory checks.
 
 #include <algorithm>
@@ -62,12 +62,14 @@ bool cells_valid(const px::World& w) {
       const px::Chunk& c = w.chunk(cx, cy);
       for (int i = 0; i < px::kChunkArea; ++i) {
         if (c.material[i] >= reg.size()) return false;
-        if (c.velocity_y[i] < -120 || c.velocity_y[i] > 8) return false;  // negative: liquid settle count
-        if (c.velocity_x[i] < -1 || c.velocity_x[i] > 1) return false;
-        if (c.shade[i] > 15) return false;
-        if (c.temperature[i] < -273 || c.temperature[i] > 2000) return false;
+        const px::MaterialProps& p = reg.props(c.material[i]);
+        if (p.uses_motion) {
+          if (c.fall_speed(i) < -120 || c.fall_speed(i) > 8) return false;  // negative: liquid settle count
+          if ((c.motion[i] >> 10) != 0) return false;                        // unused bits stay clear
+        }
+        if (c.temperature(i) < -273 || c.temperature(i) > 2000) return false;
         // A running lifetime only on materials that can expire or were set burning.
-        if (c.life[i] != 0 && reg.props(c.material[i]).lifetime_max == 0) return false;
+        if (!p.uses_motion && c.life(i) != 0 && p.lifetime_max == 0) return false;
       }
     }
   return true;
@@ -258,7 +260,7 @@ int main(int argc, char** argv) {
 
   // ---------------------------------------------------------------- long run
   const int long_steps = quick ? 2000 : 30000;
-  std::printf("\nLong run: %d steps (update clock wraps every 255) with periodic pours\n", long_steps);
+  std::printf("\nLong run: %d steps with periodic pours\n", long_steps);
   {
     px::World w(8, 5, reg, 7);
     px::build_demo_scene(w, ids);

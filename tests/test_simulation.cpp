@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdlib>
+#include <stdexcept>
 #include <vector>
 
 #include "core/material.hpp"
@@ -528,7 +529,7 @@ TEST(wrapping_world_maps_every_x_onto_the_ring) {
   px::World a(2, 1, f.materials, 9, px::EdgeX::Wrap), b(2, 1, f.materials, 9, px::EdgeX::Wrap);
   a.set(3, 3, f.ids.sand);
   b.set(3 + b.width(), 3, f.ids.sand);
-  CHECK_EQ(a.chunk_for(3, 3).shade[px::World::local_index(3, 3)], b.chunk_for(3, 3).shade[px::World::local_index(3, 3)]);
+  CHECK_EQ(a.chunk_for(3, 3).shade(px::World::local_index(3, 3)), b.chunk_for(3, 3).shade(px::World::local_index(3, 3)));
 }
 
 TEST(walled_world_keeps_its_side_walls) {
@@ -686,4 +687,90 @@ TEST(a_region_covering_everything_matches_plain_step) {
         }
   }
   CHECK(same);
+}
+
+// ------------------------------------------------------------------ packed cells
+
+TEST(packed_cell_fields_do_not_disturb_each_other) {
+  px::Chunk c;
+  const int i = px::Chunk::index(5, 7);
+  CHECK_EQ(c.temperature(i), px::kAmbient);  // new chunks start at ambient
+  c.set_shade(i, 13);
+  c.set_temperature(i, -273);
+  CHECK_EQ(c.temperature(i), -273);
+  CHECK_EQ(c.shade(i), 13);
+  c.set_temperature(i, px::Chunk::kMaxTemp);
+  CHECK_EQ(c.temperature(i), px::Chunk::kMaxTemp);
+  CHECK_EQ(c.shade(i), 13);
+  c.set_temperature(i, 100000);  // clamped, not wrapped
+  CHECK_EQ(c.temperature(i), px::Chunk::kMaxTemp);
+  c.set_temperature(i, -5000);
+  CHECK_EQ(c.temperature(i), px::Chunk::kMinTemp);
+  CHECK(px::Chunk::kMaxTemp >= 3000);  // well above lava (1200)
+
+  for (int v : {-120, -1, 0, 1, 8}) {
+    for (int d : {-1, 0, 1}) {
+      c.set_fall_speed(i, v);
+      c.set_flow(i, d);
+      CHECK_EQ(c.fall_speed(i), v);
+      CHECK_EQ(c.flow(i), d);
+      c.set_fall_speed(i, v);  // writing one half keeps the other
+      CHECK_EQ(c.flow(i), d);
+    }
+  }
+  c.set_life(i, 900);
+  CHECK_EQ(c.life(i), 900);
+}
+
+TEST(update_bits_are_per_step) {
+  px::Chunk c;
+  const int i = 100;
+  CHECK(!c.was_updated(i, 1));
+  c.mark_updated(i, 1);
+  CHECK(c.was_updated(i, 1));
+  CHECK(!c.was_updated(i + 1, 1));
+  CHECK(!c.was_updated(i, 2));  // a new step: everything is fresh again
+  c.mark_updated(i + 1, 2);
+  CHECK(!c.was_updated(i, 2));  // the old step's bit was cleared
+  c.clear_updated(i + 1);
+  CHECK(!c.was_updated(i + 1, 2));
+  CHECK(!c.was_updated(i, 1 + 255));  // no wraparound, unlike a clock byte
+}
+
+TEST(registry_rejects_expiring_powders_and_liquids) {
+  // Powders and liquids keep their motion where other materials keep a lifetime.
+  px::MaterialRegistry reg;
+  px::MaterialDef d;
+  d.name = "fizz";
+  d.phase = px::Phase::Liquid;
+  d.density = 900;
+  d.lifetime_min = d.lifetime_max = 60;
+  reg.add(d);
+  bool threw = false;
+  try {
+    reg.finalize();
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
+
+  px::MaterialRegistry reg2;
+  px::MaterialDef goo;
+  goo.name = "goo";
+  goo.phase = px::Phase::Liquid;
+  reg2.add(goo);
+  px::MaterialDef husk;
+  husk.name = "husk";
+  husk.phase = px::Phase::Solid;
+  husk.high_temp = 100;
+  husk.high_to = "goo";
+  husk.burn_time = 50;  // a lifetime handed to a liquid
+  reg2.add(husk);
+  threw = false;
+  try {
+    reg2.finalize();
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
 }
