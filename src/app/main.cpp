@@ -18,18 +18,23 @@
 //   T              toggle heat view (temperature map)
 //   Space          pause / resume
 //   . (period)     single step while paused
-//   R              regenerate the world (same seed)
+//   F5             save (to saves/quicksave)
+//   F9             load (from saves/quicksave)
+//   R              regenerate the world (same seed, changes discarded)
 //   N              new world (new seed)
 //   C              clear the world
 //   F              toggle the active-region (dirty rect) overlay
 //   Esc            quit
 //
 // The generated world wraps around horizontally: keep going right and you come
-// back to where you started.
+// back to where you started. Only the chunks around the camera are in memory;
+// the rest live on disk (changed ones) or are regenerated from the seed when
+// the camera comes back (unchanged ones).
 //
 // Command line:
 //   --seed N    world seed (default 0xC0FFEE)
 //   --demo      the small hand-built demo scene instead of a generated world
+//   --load DIR  start from a save
 //   --frames N  quit after N frames (for smoke tests)
 
 #include <SDL.h>
@@ -40,7 +45,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,12 +58,15 @@
 #include "render/pixel_renderer.hpp"
 #include "render/text.hpp"
 #include "sandbox/tools.hpp"
+#include "save/chunk_store.hpp"
+#include "save/streamer.hpp"
+#include "save/world_save.hpp"
 #include "world/demo_scene.hpp"
 #include "world/world_gen.hpp"
 
 namespace {
 
-constexpr int kWorldChunksX = 64;  // 4096 x 1536 cells, wrapping around in x
+constexpr int kWorldChunksX = 256;  // 16384 x 1536 cells, wrapping around in x (streamed)
 constexpr int kWorldChunksY = 24;
 constexpr int kDemoChunksX = 8;  // 512 x 320 cells
 constexpr int kDemoChunksY = 5;
@@ -73,6 +83,38 @@ constexpr double kSimBudgetMs = 10.0;
 // Chunks beyond the view that keep simulating; everything further away is
 // paused (and resumes when the camera comes back), like Noita.
 constexpr int kSimMarginChunks = 2;
+// Streaming, in chunks beyond the simulated region: loaded right away (so
+// everything that simulates only ever meets loaded chunks), prefetched a few
+// per frame, and kept before unloading (so edge chunks do not thrash).
+constexpr int kRequiredMargin = 1;
+constexpr int kPrefetchMargin = 2;
+constexpr int kKeepMargin = 3;
+constexpr int kPrefetchPerFrame = 6;
+const char* const kQuickSave = "saves/quicksave";
+
+/// One world being played, and what keeps it streamed. Members are destroyed in
+/// reverse order: the streamer before what it refers to.
+struct Session {
+  std::unique_ptr<px::World> world;
+  std::unique_ptr<px::ChunkStore> store;          // null: everything in memory (demo)
+  std::optional<px::WorldGenerator> generator;    // recreates untouched chunks
+  std::optional<px::WorldGenParams> gen_params;   // recorded in saves
+  std::unique_ptr<px::ChunkStreamer> streamer;
+  double home_x = 0.0, home_y = 0.0;              // camera start
+};
+
+/// A scratch directory for the chunks this session unloads.
+std::filesystem::path session_dir() {
+  static int counter = 0;
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  return std::filesystem::temp_directory_path() /
+         ("pixel_sandbox_" + std::to_string(stamp % 1000000007) + "_" + std::to_string(counter++));
+}
+
+void attach_streaming(Session& s) {
+  s.store = std::make_unique<px::ChunkStore>(session_dir());
+  s.streamer = std::make_unique<px::ChunkStreamer>(*s.world, *s.store, s.generator ? &*s.generator : nullptr);
+}
 
 struct Brush {
   px::MaterialId material = px::kEmpty;
@@ -119,44 +161,78 @@ int main(int argc, char** argv) {
   long max_frames = -1;
   bool demo = false;
   std::uint64_t seed = 0xC0FFEEULL;
+  std::string load_dir;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) max_frames = std::atol(argv[++i]);
     else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) seed = std::strtoull(argv[++i], nullptr, 0);
     else if (std::strcmp(argv[i], "--demo") == 0) demo = true;
+    else if (std::strcmp(argv[i], "--load") == 0 && i + 1 < argc) load_dir = argv[++i];
   }
 
   px::MaterialRegistry materials;
   const px::BaseMaterials ids = px::register_base_materials(materials);
   px::PixelRenderer renderer(materials);
 
+  const int w = demo ? kDemoChunksX * px::kChunkSize : kViewW;  // view size in cells
+  const int h = demo ? kDemoChunksY * px::kChunkSize : kViewH;
+
   // The World's seed drives both generation and the simulation's randomness,
-  // so a new seed means a new World object.
-  auto make_world = [&](std::uint64_t s) {
-    return demo ? std::make_unique<px::World>(kDemoChunksX, kDemoChunksY, materials, s)
-                : std::make_unique<px::World>(kWorldChunksX, kWorldChunksY, materials, s, px::EdgeX::Wrap);
+  // so a new seed means a new World (and session).
+  auto new_session = [&](std::uint64_t s) {
+    auto session = std::make_unique<Session>();
+    if (demo) {
+      session->world = std::make_unique<px::World>(kDemoChunksX, kDemoChunksY, materials, s);
+      px::build_demo_scene(*session->world, ids);
+      return session;
+    }
+    session->world = std::make_unique<px::World>(kWorldChunksX, kWorldChunksY, materials, s, px::EdgeX::Wrap,
+                                                 px::ChunkStorage::Streamed);
+    session->gen_params = px::WorldGenParams{};
+    session->generator.emplace(ids, s, session->world->width(), session->world->height(), *session->gen_params);
+    attach_streaming(*session);
+    session->home_x = session->world->width() / 2.0 - w / 2.0;
+    session->home_y =
+        std::clamp(session->generator->surface_y(session->world->width() / 2) - h / 3, 0, session->world->height() - h);
+    return session;
   };
-  std::unique_ptr<px::World> world_ptr = make_world(seed);
-  const int w = demo ? world_ptr->width() : kViewW;  // view size in cells
-  const int h = demo ? world_ptr->height() : kViewH;
+  // Saves always load streamed, whatever they came from.
+  auto load_session = [&](const std::string& dir, std::string& error) -> std::unique_ptr<Session> {
+    std::optional<px::OpenedSave> save = px::open_save(dir, materials, &error);
+    if (!save) return nullptr;
+    auto session = std::make_unique<Session>();
+    session->world = std::move(save->world);
+    session->gen_params = save->info.generator;
+    if (session->gen_params) {
+      session->generator.emplace(ids, session->world->seed(), session->world->width(), session->world->height(),
+                                 *session->gen_params);
+    }
+    attach_streaming(*session);
+    session->store->set_base(save->chunk_dir, save->remap);
+    session->home_x = save->info.view_x;
+    session->home_y = save->info.view_y;
+    return session;
+  };
+
+  std::unique_ptr<Session> session;
+  std::string toast;          // a short message shown on screen (saved, loaded, errors)
+  double toast_time = 0.0;
+  if (!load_dir.empty()) {
+    std::string error;
+    session = load_session(load_dir, error);
+    if (session) {
+      seed = session->world->seed();
+      toast = "loaded " + load_dir;
+    } else {
+      toast = "cannot load: " + error;
+    }
+    toast_time = 4.0;
+  }
+  if (!session) session = new_session(seed);
 
   // Camera: top-left of the view in world cells. x is never wrapped here (the
   // renderer and World wrap it), so a paint stroke stays continuous while the
   // camera crosses the seam.
-  double cam_x = 0.0, cam_y = 0.0;
-  double home_x = 0.0, home_y = 0.0;
-  auto build = [&](px::World& wd) {
-    if (demo) {
-      px::build_demo_scene(wd, ids);
-      return;
-    }
-    const px::WorldGenerator gen(ids, wd.seed(), wd.width(), wd.height());
-    gen.generate(wd);
-    home_x = wd.width() / 2.0 - w / 2.0;
-    home_y = std::clamp(gen.surface_y(wd.width() / 2) - h / 3, 0, wd.height() - h);
-    cam_x = home_x;
-    cam_y = home_y;
-  };
-  build(*world_ptr);
+  double cam_x = session->home_x, cam_y = session->home_y;
 
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     report_error("SDL_Init");
@@ -217,7 +293,7 @@ int main(int argc, char** argv) {
   auto cam_ix = [&] { return static_cast<int>(std::floor(cam_x)); };
   auto cam_iy = [&] { return static_cast<int>(std::floor(cam_y)); };
   auto stroke_to = [&](int view_x, int view_y, bool erase) {
-    px::World& world = *world_ptr;
+    px::World& world = *session->world;
     const int x = view_x + cam_ix(), y = view_y + cam_iy();
     const px::MaterialId m = erase ? px::kEmpty : brush.material;
     const float coverage = erase ? 1.0f : coverage_for(materials, m);
@@ -244,7 +320,8 @@ int main(int argc, char** argv) {
   int pan_x = 0, pan_y = 0;
   auto clamp_camera = [&] {
     if (demo) return;
-    cam_y = std::clamp(cam_y, 0.0, static_cast<double>(world_ptr->height() - h));
+    const int max_y = session->world->height() - h;
+    cam_y = max_y > 0 ? std::clamp(cam_y, 0.0, static_cast<double>(max_y)) : 0.0;  // a world shorter than the view
   };
   auto cycle_material = [&](int dir) {
     tool = Tool::Paint;
@@ -255,17 +332,43 @@ int main(int argc, char** argv) {
     brush.material = static_cast<px::MaterialId>(m);
   };
 
-  bool new_world = false;
+  // Actions that replace the session run between frames: `world` below must
+  // stay valid for the whole frame.
+  enum class Pending { None, NewWorld, Regenerate, Load };
+  Pending pending = Pending::None;
+  auto show = [&](std::string message) {
+    toast = std::move(message);
+    toast_time = 3.0;
+  };
   for (long frame = 0; running && (max_frames < 0 || frame < max_frames); ++frame) {
-    if (new_world) {  // swapped between frames: `world` below must stay valid for the whole frame
-      seed = px::hash32(static_cast<std::uint32_t>(seed) + 0x9E3779B9U) |
-             (static_cast<std::uint64_t>(px::hash32(static_cast<std::uint32_t>(seed >> 32) + 1U)) << 32);
-      world_ptr = make_world(seed);
-      build(*world_ptr);
-      stroke_active = false;
-      new_world = false;
+    if (pending != Pending::None) {
+      if (pending == Pending::NewWorld) {
+        seed = px::hash32(static_cast<std::uint32_t>(seed) + 0x9E3779B9U) |
+               (static_cast<std::uint64_t>(px::hash32(static_cast<std::uint32_t>(seed >> 32) + 1U)) << 32);
+      }
+      std::unique_ptr<Session> next;
+      if (pending == Pending::Load) {
+        std::string error;
+        next = load_session(kQuickSave, error);
+        if (next) {
+          seed = next->world->seed();
+          show("loaded " + std::string(kQuickSave));
+        } else {
+          show("cannot load: " + error);
+        }
+      } else {
+        next = new_session(seed);
+      }
+      if (next) {
+        session = std::move(next);
+        cam_x = session->home_x;
+        cam_y = session->home_y;
+        clamp_camera();
+        stroke_active = false;
+      }
+      pending = Pending::None;
     }
-    px::World& world = *world_ptr;
+    px::World& world = *session->world;
     painted_this_frame = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -294,13 +397,37 @@ int main(int argc, char** argv) {
             case SDLK_q: cycle_material(-1); break;
             case SDLK_e: cycle_material(1); break;
             case SDLK_t: show_heat = !show_heat; break;
-            case SDLK_r: build(world); break;
-            case SDLK_n: new_world = true; break;
-            case SDLK_c: world.clear(); break;
+            case SDLK_r: pending = Pending::Regenerate; break;
+            case SDLK_n: pending = Pending::NewWorld; break;
+            case SDLK_F9: pending = Pending::Load; break;
+            case SDLK_F5: {
+              px::SaveInfo info;
+              info.generator = session->gen_params;
+              info.view_x = cam_ix();
+              info.view_y = cam_iy();
+              std::string error;
+              if (px::save_world(world, info, kQuickSave, session->store.get(), &error)) {
+                if (session->store) px::mark_saved(world, *session->store, kQuickSave);
+                show("saved to " + std::string(kQuickSave));
+              } else {
+                show("save failed: " + error);
+              }
+              break;
+            }
+            case SDLK_c:
+              // Everything empty: forget stored chunks and stop regenerating, so
+              // chunks loaded later come back empty too.
+              if (session->store) {
+                session->store->clear();
+                session->streamer->set_generator(nullptr);
+                session->gen_params.reset();
+              }
+              world.clear();
+              break;
             case SDLK_f: show_dirty = !show_dirty; break;
             case SDLK_HOME:
-              cam_x = home_x;
-              cam_y = home_y;
+              cam_x = session->home_x;
+              cam_y = session->home_y;
               break;
             default: break;
           }
@@ -360,6 +487,23 @@ int main(int argc, char** argv) {
       clamp_camera();
     }
 
+    // The simulated region: the view plus a margin, chunks beyond it pause.
+    px::ChunkRegion region;
+    if (demo) {
+      region = {0, 0, world.width_chunks() - 1, world.height_chunks() - 1};
+    } else {
+      region.cx0 = (cam_ix() >> px::kChunkShift) - kSimMarginChunks;
+      region.cy0 = (cam_iy() >> px::kChunkShift) - kSimMarginChunks;
+      region.cx1 = ((cam_ix() + w - 1) >> px::kChunkShift) + kSimMarginChunks;
+      region.cy1 = ((cam_iy() + h - 1) >> px::kChunkShift) + kSimMarginChunks;
+    }
+    // Stream chunks in around it and out far from it.
+    if (session->streamer) {
+      auto grow = [&](int m) { return px::ChunkRegion{region.cx0 - m, region.cy0 - m, region.cx1 + m, region.cy1 + m}; };
+      session->streamer->update(grow(kRequiredMargin), grow(kPrefetchMargin), grow(kKeepMargin), kPrefetchPerFrame);
+      if (!session->streamer->last_error().empty() && toast_time <= 0.0) show(session->streamer->last_error());
+    }
+
     // Holding the button still keeps pouring at the cursor.
     int wx = 0, wy = 0;
     const Uint32 buttons = SDL_GetMouseState(&wx, &wy);
@@ -372,15 +516,6 @@ int main(int argc, char** argv) {
     }
 
     // Fixed-timestep simulation, limited to the chunks around the camera.
-    px::ChunkRegion region;
-    if (demo) {
-      region = {0, 0, world.width_chunks() - 1, world.height_chunks() - 1};
-    } else {
-      region.cx0 = (cam_ix() >> px::kChunkShift) - kSimMarginChunks;
-      region.cy0 = (cam_iy() >> px::kChunkShift) - kSimMarginChunks;
-      region.cx1 = ((cam_ix() + w - 1) >> px::kChunkShift) + kSimMarginChunks;
-      region.cy1 = ((cam_iy() + h - 1) >> px::kChunkShift) + kSimMarginChunks;
-    }
     accumulator = std::min(accumulator + dt, kStepSeconds * kMaxStepsPerFrame);
     if (paused) accumulator = 0.0;
     int steps = paused ? (single_step ? 1 : 0) : static_cast<int>(accumulator / kStepSeconds);
@@ -419,6 +554,11 @@ int main(int argc, char** argv) {
       const int px0 = (mx < pw + 8 && my < static_cast<int>(lines.size()) * px::kLineHeight + 12) ? w - pw - 2 : 2;
       px::draw_text_panel(pixels.data(), w, w, h, px0, 2, lines);
     }
+    if (toast_time > 0.0) {
+      toast_time -= dt;
+      const int tw = px::text_width(toast) + 6;
+      px::draw_text_panel(pixels.data(), w, w, h, (w - tw) / 2, h - 16, {toast}, 0xFFFFE080U);
+    }
     SDL_UpdateTexture(texture, nullptr, pixels.data(), w * static_cast<int>(sizeof(std::uint32_t)));
     SDL_RenderClear(sdl_renderer);
     SDL_RenderCopy(sdl_renderer, texture, nullptr, nullptr);
@@ -427,10 +567,12 @@ int main(int argc, char** argv) {
     ++frames;
     title_timer += dt;
     if (title_timer >= 0.5) {
-      char where[96] = "";
+      char where[160] = "";
       if (!demo) {
-        std::snprintf(where, sizeof(where), " | seed %llu | x %d/%d depth %d", static_cast<unsigned long long>(seed),
-                      world.wrap_x(cam_ix() + w / 2), world.width(), cam_iy() + h / 2);
+        const int resident = world.loaded_chunk_count();
+        std::snprintf(where, sizeof(where), " | seed %llu | x %d/%d depth %d | %d chunks in memory (%.1f MiB)",
+                      static_cast<unsigned long long>(seed), world.wrap_x(cam_ix() + w / 2), world.width(),
+                      cam_iy() + h / 2, resident, resident * static_cast<double>(sizeof(px::Chunk)) / (1024.0 * 1024.0));
       }
       char title[320];
       std::snprintf(title, sizeof(title),

@@ -31,17 +31,19 @@ Implement in this order. Progress as of 2026-11-21: ✅ done · 🟡 partly done
 1. Pixel simulation engine — ✅ Done: powders, liquids (with settling), gases,
    solids, temperature and heat flow, deterministic RNG, simulation separate
    from rendering.
-2. Chunk management — ✅ Done for an in-memory world: 64×64 SoA chunks,
-   dirty rects and sleeping, simulating only around the camera, horizontal
-   wrapping. Chunk streaming (loading/unloading) is still to do.
+2. Chunk management — ✅ Done: 64×64 SoA chunks, dirty rects and sleeping,
+   simulating only around the camera, horizontal wrapping, and streaming:
+   chunks load around the camera and unload behind it (changed ones to disk,
+   unchanged ones regenerated from the seed).
 3. Data-driven material interactions — ✅ Done: materials, temperature
    transitions and pair reactions are data. Reactions can derive products from
    their parents (runtime variants, interned) and release heat. Pixels can hold
    their own properties via variants, plus per-pixel temperature and health.
    A state-flags byte is planned for when the first flag is needed.
-4. Deterministic world generation — 🟡 Partly done: seeded, chunk-independent
-   generation with biomes, caves, pools, deposits and a wrapping seam is done.
-   Save/load is not started.
+4. Deterministic world generation — ✅ Done: seeded, chunk-independent
+   generation with biomes, caves, pools, deposits and a wrapping seam, plus
+   save/load (only changed chunks are stored; derived materials are saved by
+   recipe).
 5. Sandbox tools (spawn, erase, heat/cool, inspect pixel properties) — ✅
    Done: paint/erase brushes for every material, heat and cool brushes (melt
    rock, harden lava, boil, freeze, ignite, extinguish), a pixel inspector

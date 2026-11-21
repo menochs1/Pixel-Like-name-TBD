@@ -115,8 +115,9 @@ int WorldGenerator::wrap_dx(int dx) const {
 }
 
 float WorldGenerator::biome_value(int x) const {
-  // Huge, slow features: a handful of biome regions around the world.
-  return fbm(sub_seed(seed_, kBiome), width_, static_cast<float>(x), 137.0f, static_cast<float>(width_) / 3.0f, 2);
+  // Huge, slow features: biome regions roughly 1400 cells across (three around
+  // a 4096-wide world, a dozen around a 16384-wide one).
+  return fbm(sub_seed(seed_, kBiome), width_, static_cast<float>(x), 137.0f, 1400.0f, 2);
 }
 
 WorldGenerator::Column WorldGenerator::column(int x) const {
@@ -344,7 +345,8 @@ MaterialId WorldGenerator::material_at(int x, int y) const {
 
 void WorldGenerator::generate_chunk(World& world, int cx, int cy) const {
   const MaterialRegistry& reg = world.materials();
-  Chunk& c = world.chunk(cx, cy);
+  Chunk* slot = world.chunk_ptr(cx, cy);
+  Chunk& c = slot ? *slot : world.load_chunk(cx, cy, std::make_unique<Chunk>());
   c = Chunk{};
   const int x0 = cx << kChunkShift, y0 = cy << kChunkShift;
   Column cols[kChunkSize];
@@ -367,6 +369,7 @@ void WorldGenerator::generate_chunk(World& world, int cx, int cy) const {
       }
     }
   }
+  c.touched = false;  // exactly what generation gives: no need to save it
 }
 
 void WorldGenerator::generate(World& world, int threads) const {
@@ -379,7 +382,8 @@ void WorldGenerator::generate(World& world, int threads) const {
   std::atomic<int> next{0};
   auto work = [&] {
     for (int i = next.fetch_add(1); i < total; i = next.fetch_add(1)) {
-      generate_chunk(world, i % world.width_chunks(), i / world.width_chunks());
+      const int cx = i % world.width_chunks(), cy = i / world.width_chunks();
+      if (world.loaded(cx, cy)) generate_chunk(world, cx, cy);
     }
   };
   std::vector<std::thread> pool;

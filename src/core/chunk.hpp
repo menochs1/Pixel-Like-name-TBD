@@ -75,6 +75,11 @@ struct Chunk {
   DirtyRect dirty;       // being processed this step (can grow mid-step)
   DirtyRect next_dirty;  // collected this step, processed next step
 
+  /// Changed since it was generated or loaded: any cell write, wake-up or
+  /// consumed pending work sets it. An untouched chunk need not be saved: it can
+  /// be generated again (or, in a world without a generator, it is empty).
+  bool touched = false;
+
   static constexpr std::uint8_t kFullHealth = 255;
 
   Chunk() {
@@ -88,11 +93,13 @@ struct Chunk {
   Temperature temperature(int i) const { return static_cast<Temperature>((thermal[i] & 0x0FFF) - kTempBias); }
   /// Clamped to [kMinTemp, kMaxTemp].
   void set_temperature(int i, int t) {
+    touched = true;
     t = std::clamp(t, kMinTemp, kMaxTemp);
     thermal[i] = static_cast<std::uint16_t>((thermal[i] & 0xF000) | (t + kTempBias));
   }
   std::uint8_t shade(int i) const { return static_cast<std::uint8_t>(thermal[i] >> 12); }
   void set_shade(int i, unsigned s) {
+    touched = true;
     thermal[i] = static_cast<std::uint16_t>((thermal[i] & 0x0FFF) | ((s & 0x0F) << 12));
   }
 
@@ -100,6 +107,7 @@ struct Chunk {
   /// Fall speed (>= 0), or for a resting liquid -(settle count).
   int fall_speed(int i) const { return static_cast<std::int8_t>(motion[i] & 0xFF); }
   void set_fall_speed(int i, int v) {
+    touched = true;
     motion[i] = static_cast<std::uint16_t>((motion[i] & 0xFF00) | static_cast<std::uint8_t>(static_cast<std::int8_t>(v)));
   }
   /// Liquid flow direction: -1, 0 or +1.
@@ -108,12 +116,16 @@ struct Chunk {
     return f == 3 ? -1 : f;
   }
   void set_flow(int i, int d) {
+    touched = true;
     motion[i] = static_cast<std::uint16_t>((motion[i] & 0x00FF) | (static_cast<unsigned>(d & 3) << 8));
   }
 
   // ---- motion: everything else
   std::uint16_t life(int i) const { return motion[i]; }
-  void set_life(int i, std::uint16_t steps) { motion[i] = steps; }
+  void set_life(int i, std::uint16_t steps) {
+    touched = true;
+    motion[i] = steps;
+  }
 
   // ---- per-step update bit
   bool was_updated(int i, std::uint32_t tick) {
@@ -121,6 +133,7 @@ struct Chunk {
     return (updated_bits[static_cast<std::size_t>(i >> 6)] >> (i & 63)) & 1U;
   }
   void mark_updated(int i, std::uint32_t tick) {
+    touched = true;  // every move and transform marks its cells
     if (updated_tick != tick) {
       updated_bits.fill(0);
       updated_tick = tick;

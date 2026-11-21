@@ -39,6 +39,10 @@ add_library(px_core
   src/world/demo_scene.cpp
   src/world/world_gen.cpp
   src/sandbox/tools.cpp
+  src/save/chunk_codec.cpp
+  src/save/chunk_store.cpp
+  src/save/world_save.cpp
+  src/save/streamer.cpp
 )
 target_include_directories(px_core PUBLIC src)
 find_package(Threads REQUIRED)  # world generation fills chunks in parallel
@@ -81,7 +85,7 @@ endif()
 
 if(PX_BUILD_TESTS)
   enable_testing()
-  add_executable(px_tests tests/test_main.cpp tests/test_simulation.cpp tests/test_world_gen.cpp tests/test_materials.cpp tests/test_tools.cpp)
+  add_executable(px_tests tests/test_main.cpp tests/test_simulation.cpp tests/test_world_gen.cpp tests/test_materials.cpp tests/test_tools.cpp tests/test_save.cpp)
   target_link_libraries(px_tests PRIVATE px_render)  # px_render includes px_core
   target_compile_options(px_tests PRIVATE ${PX_WARNINGS})
   add_test(NAME px_tests COMMAND px_tests)

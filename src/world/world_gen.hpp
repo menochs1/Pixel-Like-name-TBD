@@ -47,12 +47,13 @@ class WorldGenerator {
   /// Rows above this (smaller y) are dry; ground below it is flooded up to it.
   int sea_level() const { return sea_y_; }
 
-  /// Writes chunk (cx, cy) of `world`, waking only cells that may move or
-  /// change. Touches no other chunk, so different chunks may be generated
-  /// from different threads at once.
+  /// Writes chunk (cx, cy) of `world` (loading an empty chunk there first if
+  /// none is loaded), waking only cells that may move or change. The result is
+  /// marked untouched. Touches no other chunk, so different loaded chunks may
+  /// be generated from different threads at once.
   void generate_chunk(World& world, int cx, int cy) const;
-  /// Generates every chunk, spread over `threads` threads (0 = hardware count).
-  /// The world must be width x height cells.
+  /// Generates every loaded chunk, spread over `threads` threads (0 = hardware
+  /// count). The world must be width x height cells.
   void generate(World& world, int threads = 0) const;
 
  private:

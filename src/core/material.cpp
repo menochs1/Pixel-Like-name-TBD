@@ -32,6 +32,7 @@ MaterialId MaterialRegistry::add(MaterialDef def) {
     defs_.resize(defs_.size() - derived_);
     props_.resize(props_.size() - derived_);
     variants_.clear();
+    records_.clear();
     derived_ = 0;
   }
   if (defs_.size() >= kMaxMaterials) throw std::length_error("MaterialRegistry: too many materials");
@@ -117,6 +118,7 @@ void MaterialRegistry::finalize() {
   if (derived_ > 0) {
     defs_.resize(defs_.size() - derived_);
     variants_.clear();
+    records_.clear();
     derived_ = 0;
   }
   authored_count_ = defs_.size();
@@ -170,7 +172,7 @@ void MaterialRegistry::finalize() {
 
 // ------------------------------------------------------------------ derived materials
 
-std::size_t MaterialRegistry::VariantKeyHash::operator()(const VariantKey& k) const {
+std::size_t MaterialRegistry::VariantHash::operator()(const VariantRecord& k) const {
   std::uint64_t h = 1469598103934665603ULL;
   auto mix = [&](std::uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
   mix(k.base);
@@ -237,29 +239,48 @@ MaterialId MaterialRegistry::derive(MaterialId product, const Derivation& rule, 
                               0.0f, 1.0f);
   }
 
-  auto key_of = [&](MaterialId base, float dens, float cond, std::optional<Temperature> ign, float flam, Color c) {
-    return VariantKey{base,
-                      quantize(dens, kDensityStep),
-                      quantize(cond, kConductivityStep),
-                      ign ? quantize(*ign, kIgnitionStep) : INT32_MIN,
-                      quantize(flam, kFlammabilityStep),
-                      c.r, c.g, c.b};
-  };
-  const VariantKey key = key_of(product, density, conductivity, ignition, flammability, color);
-  if (key == key_of(product, pd.density, pd.conductivity, pd.high_temp, pd.high_temp ? pd.high_chance : 0.0f, pd.color)) {
-    return product;  // no different from the element itself
-  }
-  if (auto it = variants_.find(key); it != variants_.end()) return it->second;
+  VariantRecord rec;
+  rec.base = product;
+  rec.density = quantize(density, kDensityStep);
+  rec.conductivity = quantize(conductivity, kConductivityStep);
+  rec.ignition = ignition ? quantize(*ignition, kIgnitionStep) : INT32_MIN;
+  rec.flammability = quantize(flammability, kFlammabilityStep);
+  rec.r = color.r;
+  rec.g = color.g;
+  rec.b = color.b;
+  return variant(rec);
+}
+
+VariantRecord MaterialRegistry::record_of(MaterialId authored) const {
+  const MaterialDef& d = defs_[authored];
+  VariantRecord rec;
+  rec.base = authored;
+  rec.density = quantize(d.density, kDensityStep);
+  rec.conductivity = quantize(d.conductivity, kConductivityStep);
+  rec.ignition = d.high_temp ? quantize(*d.high_temp, kIgnitionStep) : INT32_MIN;
+  rec.flammability = quantize(d.high_temp ? d.high_chance : 0.0f, kFlammabilityStep);
+  rec.r = d.color.r;
+  rec.g = d.color.g;
+  rec.b = d.color.b;
+  return rec;
+}
+
+MaterialId MaterialRegistry::variant(const VariantRecord& record) {
+  if (record.base >= authored_count_) return kEmpty;  // not an authored element: invalid record
+  const MaterialId product = record.base;
+  if (record == record_of(product)) return product;  // no different from the element itself
+  if (auto it = variants_.find(record); it != variants_.end()) return it->second;
   if (props_.size() >= kMaxMaterials) return product;  // full: fall back to the plain element
 
+  const MaterialDef& pd = defs_[product];
   MaterialDef v = pd;
   v.name = pd.name + "#" + std::to_string(derived_ + 1);
-  v.density = static_cast<float>(key.density) * kDensityStep;
-  v.conductivity = static_cast<float>(key.conductivity) * kConductivityStep;
-  v.color = color;
-  if (ignition) {
-    v.high_temp = static_cast<Temperature>(key.ignition * static_cast<std::int32_t>(kIgnitionStep));
-    v.high_chance = static_cast<float>(key.flammability) * kFlammabilityStep;
+  v.density = static_cast<float>(record.density) * kDensityStep;
+  v.conductivity = std::clamp(static_cast<float>(record.conductivity) * kConductivityStep, 0.0f, 1.0f);
+  v.color = {record.r, record.g, record.b};
+  if (pd.high_temp && record.ignition != INT32_MIN) {
+    v.high_temp = static_cast<Temperature>(record.ignition * static_cast<std::int32_t>(kIgnitionStep));
+    v.high_chance = std::clamp(static_cast<float>(record.flammability) * kFlammabilityStep, 0.0f, 1.0f);
   }
   const auto id = static_cast<MaterialId>(defs_.size());
   MaterialProps p = resolve(v);
@@ -268,9 +289,15 @@ MaterialId MaterialRegistry::derive(MaterialId product, const Derivation& rule, 
   p.active_at_ambient = active_at_ambient(p);
   defs_.push_back(std::move(v));
   props_.push_back(p);  // within the reserved capacity: references stay valid
-  variants_.emplace(key, id);
+  variants_.emplace(record, id);
+  records_.push_back(record);
   ++derived_;
   return id;
+}
+
+std::optional<VariantRecord> MaterialRegistry::variant_record(MaterialId id) const {
+  if (id < authored_count_ || id >= defs_.size()) return std::nullopt;
+  return records_[id - authored_count_];
 }
 
 BaseMaterials register_base_materials(MaterialRegistry& registry) {

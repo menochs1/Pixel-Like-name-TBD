@@ -8,7 +8,7 @@
 namespace px {
 
 World::World(int width_chunks, int height_chunks, MaterialRegistry& materials, std::uint64_t seed,
-             EdgeX edge_x)
+             EdgeX edge_x, ChunkStorage storage)
     : width_chunks_(width_chunks),
       height_chunks_(height_chunks),
       width_(width_chunks * kChunkSize),
@@ -20,6 +20,21 @@ World::World(int width_chunks, int height_chunks, MaterialRegistry& materials, s
     throw std::invalid_argument("World: dimensions must be positive");
   }
   chunks_.resize(static_cast<std::size_t>(width_chunks) * static_cast<std::size_t>(height_chunks));
+  if (storage == ChunkStorage::AllLoaded) {
+    for (auto& c : chunks_) c = std::make_unique<Chunk>();
+  }
+}
+
+Chunk& World::load_chunk(int cx, int cy, std::unique_ptr<Chunk> chunk) {
+  auto& s = chunks_[slot(cx, cy)];
+  s = std::move(chunk);
+  return *s;
+}
+
+int World::loaded_chunk_count() const {
+  int n = 0;
+  for (const auto& c : chunks_) n += c ? 1 : 0;
+  return n;
 }
 
 void World::set(int x, int y, MaterialId material) {
@@ -60,6 +75,7 @@ bool World::damage(int x, int y, int amount) {
     return true;
   }
   c.health[i] = static_cast<std::uint8_t>(c.health[i] - loss);
+  c.touched = true;
   return false;
 }
 
@@ -83,7 +99,11 @@ void World::fill_circle(int cx, int cy, int radius, MaterialId material, float c
 }
 
 void World::clear() {
-  for (Chunk& c : chunks_) c = Chunk{};
+  for (auto& c : chunks_) {
+    if (!c) continue;
+    *c = Chunk{};
+    c->touched = true;
+  }
 }
 
 void World::wake(int x, int y) {
@@ -98,6 +118,7 @@ void World::wake(int x, int y) {
     Chunk& c = chunk_for(x, y);
     c.dirty.include_rect(lx - 1, ly - 1, lx + 1, ly + 1);
     c.next_dirty.include_rect(lx - 1, ly - 1, lx + 1, ly + 1);
+    c.touched = true;
     return;
   }
   for (int dy = -1; dy <= 1; ++dy) {
@@ -108,6 +129,7 @@ void World::wake(int x, int y) {
       Chunk& c = chunk_for(nx, ny);
       c.dirty.include(nx & kChunkMask, ny & kChunkMask);
       c.next_dirty.include(nx & kChunkMask, ny & kChunkMask);
+      c.touched = true;
     }
   }
 }
@@ -119,8 +141,17 @@ void World::wake_area(int x, int y, int r) {
     Chunk& c = chunk_for(x, y);
     c.dirty.include_rect(lx - r, ly - r, lx + r, ly + r);
     c.next_dirty.include_rect(lx - r, ly - r, lx + r, ly + r);
+    c.touched = true;
     return;
   }
+  // Marks one box within a single chunk, if that chunk is loaded.
+  auto mark = [&](int bx0, int by0, int bx1, int by1) {
+    if (!in_bounds(bx0, by0)) return;
+    Chunk& c = chunk_for(bx0, by0);
+    c.dirty.include_rect(bx0 & kChunkMask, by0 & kChunkMask, bx1 & kChunkMask, by1 & kChunkMask);
+    c.next_dirty.include_rect(bx0 & kChunkMask, by0 & kChunkMask, bx1 & kChunkMask, by1 & kChunkMask);
+    c.touched = true;
+  };
   // The box crosses a chunk edge: split it into one rect per chunk touched.
   const int y0 = std::max(y - r, 0), y1 = std::min(y + r, height_ - 1);
   for (int sy = y0; sy <= y1;) {
@@ -128,17 +159,11 @@ void World::wake_area(int x, int y, int r) {
     for (int sx = x - r; sx <= x + r;) {
       const int ex = std::min(x + r, sx | kChunkMask);  // last column in this chunk
       if (wrap_x_ || (sx >= 0 && ex < width_)) {
-        Chunk& c = chunk_for(sx, sy);
-        c.dirty.include_rect(sx & kChunkMask, sy & kChunkMask, ex & kChunkMask, ey & kChunkMask);
-        c.next_dirty.include_rect(sx & kChunkMask, sy & kChunkMask, ex & kChunkMask, ey & kChunkMask);
+        mark(sx, sy, ex, ey);
       } else {
         // Walled world: clip to the columns that exist.
         const int cx0 = std::max(sx, 0), cx1 = std::min(ex, width_ - 1);
-        if (cx0 <= cx1) {
-          Chunk& c = chunk_for(cx0, sy);
-          c.dirty.include_rect(cx0 & kChunkMask, sy & kChunkMask, cx1 & kChunkMask, ey & kChunkMask);
-          c.next_dirty.include_rect(cx0 & kChunkMask, sy & kChunkMask, cx1 & kChunkMask, ey & kChunkMask);
-        }
+        if (cx0 <= cx1) mark(cx0, sy, cx1, ey);
       }
       sx = ex + 1;
     }
@@ -147,22 +172,25 @@ void World::wake_area(int x, int y, int r) {
 }
 
 void World::wake_all() {
-  for (Chunk& c : chunks_) {
-    c.next_dirty.include(0, 0);
-    c.next_dirty.include(kChunkMask, kChunkMask);
+  for (auto& c : chunks_) {
+    if (!c) continue;
+    c->next_dirty.include(0, 0);
+    c->next_dirty.include(kChunkMask, kChunkMask);
+    c->touched = true;
   }
 }
 
 int World::active_chunk_count() const {
   int n = 0;
-  for (const Chunk& c : chunks_) n += c.next_dirty.empty() ? 0 : 1;
+  for (const auto& c : chunks_) n += c && !c->next_dirty.empty() ? 1 : 0;
   return n;
 }
 
 std::size_t World::count(MaterialId material) const {
   std::size_t n = 0;
-  for (const Chunk& c : chunks_) {
-    for (MaterialId m : c.material) n += (m == material) ? 1 : 0;
+  for (const auto& c : chunks_) {
+    if (!c) continue;
+    for (MaterialId m : c->material) n += (m == material) ? 1 : 0;
   }
   return n;
 }

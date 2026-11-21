@@ -44,7 +44,11 @@ world generation and a world that wraps around:
   cross the seam as if it were not there.
 - Seeded world generation: biomes, hills, caves, water and oil pools, sealed
   magma chambers, coal and trees, all from one seed. Every chunk is a pure
-  function of (seed, x, y), ready for save/load and streaming.
+  function of (seed, x, y).
+- Save/load and chunk streaming: only the chunks around the camera are in
+  memory. Chunks you changed are written to disk when you move away; chunks
+  you never changed are regenerated from the seed when you come back. Saves
+  store only the changed chunks.
 
 ### Materials
 
@@ -107,10 +111,12 @@ Run the sandbox:
 ./build/pixel_sandbox
 ```
 
-The sandbox opens on a generated 4096×1536 world that wraps around
-horizontally, viewed through a 640×360 camera. `--seed N` picks the world;
-`--demo` opens the small hand-built demo scene instead (an oil pit beside a
-wooden tower, a water basin and a lava crucible).
+The sandbox opens on a generated 16384×1536 world that wraps around
+horizontally, viewed through a 640×360 camera. It is streamed: about 250
+chunks (~7 MiB) are in memory at a time instead of all 6144 (~172 MiB).
+`--seed N` picks the world, `--load DIR` starts from a save, and `--demo`
+opens the small hand-built demo scene instead (an oil pit beside a wooden
+tower, a water basin and a lava crucible).
 
 | Input | Action |
 | --- | --- |
@@ -129,7 +135,9 @@ wooden tower, a water basin and a lava crucible).
 | `T` | Heat view (temperature map) |
 | `Space` | Pause / resume |
 | `.` | Single step while paused |
-| `R` | Regenerate the world (same seed) |
+| `F5` | Save (to `saves/quicksave`) |
+| `F9` | Load (from `saves/quicksave`) |
+| `R` | Regenerate the world (same seed; changes since the last load are discarded) |
 | `N` | New world (new seed) |
 | `C` | Clear world |
 | `F` | Show active (dirty) regions |
@@ -159,6 +167,7 @@ cmake --build build-asan && ./build-asan/px_tests && ./build-asan/pixel_stress
 src/core/     material registry, chunk storage, world, simulator (no dependencies)
 src/world/    seeded world generation, demo scenes
 src/sandbox/  sandbox tools: heat/cool brushes, pixel inspector (no rendering)
+src/save/     chunk encoding, saves, chunk store and streaming
 src/render/   World -> ARGB pixel buffer, built-in 3x5 font (no SDL)
 src/app/      SDL2 window, input, fixed 60 Hz timestep
 tools/        headless benchmark / snapshot tool, stress test
@@ -353,6 +362,41 @@ in one place. Packing cut memory from 10 to ~6 bytes per cell with no
 measurable change in speed; health brings it to 7 (43 MiB for the app world).
 A state-flags byte will join when the first flag (wet, charged…) needs it.
 
+## Saving and streaming
+
+`src/save/` keeps a world on disk as well as in memory:
+
+- **Chunk encoding** (`chunk_codec`): every cell's material, temperature,
+  shade, motion/lifetime and health, plus the chunk's pending work, so a
+  chunk read back continues exactly as if it had never left. Each field is
+  run-length encoded; the shade is stored relative to the position-derived
+  shade cells get when placed. A checksum rejects damaged data. Terrain chunks
+  come out at tens to a few hundred bytes (28.6 KiB in memory).
+- **Touched chunks.** A chunk records whether anything changed it (a write, a
+  wake-up, pending work consumed) since it was generated or loaded. Untouched
+  chunks are never written: they come back identical by regenerating them
+  from the seed (or empty, in a world without a generator).
+- **Saves** (`world_save`): a directory with a header (size, edges, seed, step
+  counter, generator settings, camera position, material table) and one file
+  per touched chunk. Materials are stored by name and derived materials by
+  their recipe, so saves load even when materials are added or reordered. A
+  save is written beside the target and then swapped in, so a failed save
+  never leaves a broken one. A freshly generated world saves in a few
+  kilobytes.
+- **Streaming** (`ChunkStreamer`, `ChunkStore`): around the simulated region,
+  chunks one ring out are loaded at once, two rings out are prefetched a few
+  per frame, and anything beyond three rings is unloaded. Touched chunks go to
+  a session directory in the system temp folder, layered over the loaded save
+  (if any), which is never modified until you save again. Unloaded chunks act
+  as walls, but the loaded margin means nothing that simulates ever reaches
+  one.
+
+A test runs a streamed world through a camera path that crosses the wrap
+seam, with fires, water and sand painted along the way and a save halfway,
+next to the same world held fully in memory. The two must end identical, and
+the halfway save must load as the in-memory world was at that moment. With
+unloading deliberately broken, the test fails.
+
 ## Performance
 
 Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
@@ -405,14 +449,16 @@ and steam dragged across the whole view for 50 s) on a 2.1 GHz server core:
   stone in 10 seconds. Temperatures are whole degrees and a 1° gap does not
   flow, so buried layers can settle a degree per layer above ambient.
 - Steam and smoke drift as scattered particles rather than billowing clouds.
-- The world is still one fixed grid of chunks held in memory (43 MiB for the
-  app world). Generation is already per chunk, so save/load and then chunk
-  streaming are the next parts of roadmap step 3.
+- The world is still finite: 16384×1536 for the app, with an index slot per
+  chunk (8 bytes each), even though only the chunks near the camera are in
+  memory. Unbounded worlds would need a sparse chunk index.
+- Chunks are loaded on the main thread; prefetching a few per frame keeps
+  this smooth at camera speed, but a much faster camera could stutter.
+  Generating on a worker thread would fix that.
 - Only horizontal wrapping; the top and bottom are solid.
 - Derived materials are never freed: a variant no cell uses any more keeps its
   slot until the registry is re-finalized. Rounding keeps the count low in
-  practice; a sweep of unused variants can come with save/load, which must
-  also store the variant table.
+  practice. Saves store every variant the registry knows, used or not.
 - Nothing deals damage yet (`World::damage` is ready for digging tools and
   explosions).
 - Flicker (fire, lava) is now purely a rendering effect animated from the

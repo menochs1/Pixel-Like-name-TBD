@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "core/chunk.hpp"
@@ -13,6 +14,13 @@ namespace px {
 enum class EdgeX : std::uint8_t {
   Wall,  // cells beyond the left/right edge are an indestructible wall
   Wrap,  // x wraps around: walking off the right edge comes back in on the left
+};
+
+/// Whether a world starts with every chunk in memory, or with none so that a
+/// ChunkStreamer loads them around the player.
+enum class ChunkStorage : std::uint8_t {
+  AllLoaded,
+  Streamed,
 };
 
 /// A grid of chunks. Coordinates are in cells, y grows downward. The top and
@@ -27,10 +35,15 @@ enum class EdgeX : std::uint8_t {
 /// The world holds a pointer to its MaterialRegistry; the registry must outlive it.
 /// The simulation may add derived materials to it while stepping.
 /// World is pure data: it has no knowledge of rendering.
+///
+/// Chunks can be unloaded (ChunkStorage::Streamed). Cells of an unloaded chunk
+/// are not in_bounds and read as kOutOfBounds, so to the simulation an
+/// unloaded chunk is a solid wall; the streamer keeps a margin of loaded
+/// chunks around everything that simulates, so it never meets one.
 class World {
  public:
   World(int width_chunks, int height_chunks, MaterialRegistry& materials, std::uint64_t seed,
-        EdgeX edge_x = EdgeX::Wall);
+        EdgeX edge_x = EdgeX::Wall, ChunkStorage storage = ChunkStorage::AllLoaded);
 
   int width() const { return width_; }
   int height() const { return height_; }
@@ -49,16 +62,13 @@ class World {
     return m < 0 ? m + width_ : m;
   }
 
-  /// True if (x, y) is a real cell. On a wrapping world every x is.
-  bool in_bounds(int x, int y) const {
-    return static_cast<unsigned>(y) < static_cast<unsigned>(height_) &&
-           (wrap_x_ || static_cast<unsigned>(x) < static_cast<unsigned>(width_));
-  }
+  /// True if (x, y) is a cell of a loaded chunk. On a wrapping world any x can be.
+  bool in_bounds(int x, int y) const { return cell_chunk(x, y) != nullptr; }
 
-  /// Material at (x, y), or kOutOfBounds outside the world.
+  /// Material at (x, y), or kOutOfBounds outside the world or in an unloaded chunk.
   MaterialId get(int x, int y) const {
-    if (!in_bounds(x, y)) return kOutOfBounds;
-    return chunk_for(x, y).material[local_index(x, y)];
+    const Chunk* c = cell_chunk(x, y);
+    return c ? c->material[local_index(x, y)] : kOutOfBounds;
   }
 
   /// Places a material, resets its velocity, picks a colour shade and wakes the area.
@@ -67,13 +77,17 @@ class World {
   void set(int x, int y, MaterialId material);
 
   Temperature temperature(int x, int y) const {
-    return in_bounds(x, y) ? chunk_for(x, y).temperature(local_index(x, y)) : kAmbient;
+    const Chunk* c = cell_chunk(x, y);
+    return c ? c->temperature(local_index(x, y)) : kAmbient;
   }
   /// Clamped to the storable range, Chunk::kMinTemp..Chunk::kMaxTemp.
   void set_temperature(int x, int y, int t);
 
   /// Share of the cell's durability left, 0..255 (255 = intact, also outside the world).
-  int health(int x, int y) const { return in_bounds(x, y) ? chunk_for(x, y).health[local_index(x, y)] : 255; }
+  int health(int x, int y) const {
+    const Chunk* c = cell_chunk(x, y);
+    return c ? c->health[local_index(x, y)] : 255;
+  }
   /// Deals `amount` damage, in the same units as MaterialDef::durability. A cell
   /// whose health runs out breaks (becomes empty); a material with durability 0
   /// breaks at once. Empty cells and cells outside the world take no damage.
@@ -84,6 +98,7 @@ class World {
   /// Fills a disc. `coverage` in (0, 1] places material in that fraction of cells
   /// (deterministically), which looks more natural for powders and liquids.
   void fill_circle(int cx, int cy, int radius, MaterialId material, float coverage = 1.0f);
+  /// Empties every loaded chunk (marking them touched, so the emptiness is saved).
   void clear();
 
   /// Marks (x, y) and its 8 neighbours for update on the next step.
@@ -96,13 +111,30 @@ class World {
     Chunk& c = chunk_for(x, y);
     c.dirty.include(x & kChunkMask, y & kChunkMask);
     c.next_dirty.include(x & kChunkMask, y & kChunkMask);
+    c.touched = true;
   }
   /// Keeps just (x, y) active for the next step (a cell that is still changing).
-  void keep_awake(int x, int y) { chunk_for(x, y).next_dirty.include(x & kChunkMask, y & kChunkMask); }
+  void keep_awake(int x, int y) {
+    Chunk& c = chunk_for(x, y);
+    c.next_dirty.include(x & kChunkMask, y & kChunkMask);
+    c.touched = true;
+  }
 
-  Chunk& chunk(int cx, int cy) { return chunks_[static_cast<std::size_t>(cy * width_chunks_ + cx)]; }
-  const Chunk& chunk(int cx, int cy) const { return chunks_[static_cast<std::size_t>(cy * width_chunks_ + cx)]; }
-  /// Chunk holding cell (x, y). x may be outside [0, width) on a wrapping world.
+  /// The chunk at chunk coordinates (cx, cy); it must be loaded.
+  Chunk& chunk(int cx, int cy) { return *chunks_[slot(cx, cy)]; }
+  const Chunk& chunk(int cx, int cy) const { return *chunks_[slot(cx, cy)]; }
+  /// The chunk at (cx, cy), or nullptr if it is not loaded.
+  Chunk* chunk_ptr(int cx, int cy) { return chunks_[slot(cx, cy)].get(); }
+  const Chunk* chunk_ptr(int cx, int cy) const { return chunks_[slot(cx, cy)].get(); }
+  bool loaded(int cx, int cy) const { return chunks_[slot(cx, cy)] != nullptr; }
+  int loaded_chunk_count() const;
+  /// Puts `chunk` at (cx, cy), replacing whatever was there.
+  Chunk& load_chunk(int cx, int cy, std::unique_ptr<Chunk> chunk);
+  /// Takes chunk (cx, cy) out of the world (nullptr if it was not loaded).
+  std::unique_ptr<Chunk> unload_chunk(int cx, int cy) { return std::move(chunks_[slot(cx, cy)]); }
+
+  /// Chunk holding cell (x, y), which must be loaded. x may be outside
+  /// [0, width) on a wrapping world.
   Chunk& chunk_for(int x, int y) { return chunk(chunk_x(x), y >> kChunkShift); }
   const Chunk& chunk_for(int x, int y) const { return chunk(chunk_x(x), y >> kChunkShift); }
   /// Index within its chunk. Correct for any x: the width is a whole number of
@@ -116,8 +148,19 @@ class World {
 
   /// Called by the simulator at the start of each step.
   void advance_tick() { ++tick_; }
+  /// Restores the step counter (loading a save): the simulation's random
+  /// choices depend on it.
+  void set_tick(std::uint32_t tick) { tick_ = tick; }
 
  private:
+  std::size_t slot(int cx, int cy) const { return static_cast<std::size_t>(cy * width_chunks_ + cx); }
+  /// The loaded chunk holding cell (x, y), or nullptr (outside or unloaded).
+  const Chunk* cell_chunk(int x, int y) const {
+    if (static_cast<unsigned>(y) >= static_cast<unsigned>(height_)) return nullptr;
+    if (!wrap_x_ && static_cast<unsigned>(x) >= static_cast<unsigned>(width_)) return nullptr;
+    return chunks_[slot(chunk_x(x), y >> kChunkShift)].get();
+  }
+
   /// Chunk column of cell x, wrapped on a wrapping world.
   int chunk_x(int x) const {
     const int cx = x >> kChunkShift;  // arithmetic shift: floor division, also for negative x
@@ -134,7 +177,7 @@ class World {
   std::uint64_t seed_;
   std::uint32_t tick_ = 0;
   bool wrap_x_;
-  std::vector<Chunk> chunks_;
+  std::vector<std::unique_ptr<Chunk>> chunks_;  // nullptr = not loaded
 };
 
 }  // namespace px

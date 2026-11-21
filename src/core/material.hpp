@@ -1,5 +1,6 @@
 #pragma once
 
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -171,6 +172,19 @@ struct Reaction {
   bool swapped;                 // stored with the authored roles of a and b exchanged
 };
 
+/// The properties that make a derived material differ from its element, as
+/// rounded integers (density in 10 kg/m^3 steps, conductivity in 0.01,
+/// ignition in 5 C, flammability in 0.001 per step). Equal records are the same
+/// material. This is also how derived materials are saved and restored.
+struct VariantRecord {
+  MaterialId base = kEmpty;
+  std::int32_t density = 0, conductivity = 0;
+  std::int32_t ignition = INT32_MIN;  // INT32_MIN: the element has no high transition
+  std::int32_t flammability = 0;
+  std::uint8_t r = 0, g = 0, b = 0;
+  bool operator==(const VariantRecord&) const = default;
+};
+
 /// Owns all material definitions and the reaction table.
 class MaterialRegistry {
  public:
@@ -198,6 +212,14 @@ class MaterialRegistry {
   MaterialId derive(MaterialId product, const Derivation& rule, MaterialId a, MaterialId b);
   /// Number of materials created by derive().
   std::size_t derived_count() const { return derived_; }
+  /// The variant described by `record` (creating it if needed), or its base
+  /// element if the record matches the element itself or the table is full.
+  /// derive() goes through this; loading a save uses it to restore variants.
+  MaterialId variant(const VariantRecord& record);
+  /// The record of a derived material, or nullopt for an authored one.
+  std::optional<VariantRecord> variant_record(MaterialId id) const;
+  /// Materials defined by add() (ids below this); the rest are derived.
+  std::size_t authored_count() const { return authored_count_; }
 
   const MaterialDef& def(MaterialId id) const { return defs_[id]; }
   const MaterialProps& props(MaterialId id) const { return props_[id]; }
@@ -219,15 +241,10 @@ class MaterialRegistry {
   }
 
  private:
-  struct VariantKey {
-    MaterialId base;
-    std::int32_t density, conductivity, ignition, flammability;
-    std::uint8_t r, g, b;
-    bool operator==(const VariantKey&) const = default;
+  struct VariantHash {
+    std::size_t operator()(const VariantRecord& k) const;
   };
-  struct VariantKeyHash {
-    std::size_t operator()(const VariantKey& k) const;
-  };
+  VariantRecord record_of(MaterialId authored) const;  // an element's own values, rounded
   MaterialProps resolve(const MaterialDef& d) const;
 
   std::vector<MaterialDef> defs_;
@@ -238,7 +255,8 @@ class MaterialRegistry {
   std::vector<std::int32_t> reaction_index_;  // authored_count_^2 dense table, -1 = none
   std::size_t authored_count_ = 0;  // materials known at the last finalize()
   std::size_t derived_ = 0;         // materials created by derive() since then (they follow the authored ones)
-  std::unordered_map<VariantKey, MaterialId, VariantKeyHash> variants_;
+  std::unordered_map<VariantRecord, MaterialId, VariantHash> variants_;
+  std::vector<VariantRecord> records_;  // per derived material, in id order
 };
 
 /// Ids of the built-in materials.

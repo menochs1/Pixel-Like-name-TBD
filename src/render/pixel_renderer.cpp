@@ -120,6 +120,10 @@ void PixelRenderer::render(const World& world, std::uint32_t* pixels, int pitch,
     }
     if (!world.wraps_x()) std::fill(row, row + v.width, kOutside);
     for_each_run(world, v, [&](int sx, int wx, int n) {
+      if (!world.in_bounds(wx, wy)) {  // chunk not loaded
+        std::fill(row + sx, row + sx + n, kOutside);
+        return;
+      }
       const Chunk& c = world.chunk_for(wx, wy);
       const int base = World::local_index(wx, wy);
       for (int k = 0; k < n; ++k) {
@@ -148,6 +152,10 @@ void PixelRenderer::render_temperature(const World& world, std::uint32_t* pixels
     }
     if (!world.wraps_x()) std::fill(row, row + v.width, kOutside);
     for_each_run(world, v, [&](int sx, int wx, int n) {
+      if (!world.in_bounds(wx, wy)) {  // chunk not loaded
+        std::fill(row + sx, row + sx + n, kOutside);
+        return;
+      }
       const Chunk& c = world.chunk_for(wx, wy);
       const int base = World::local_index(wx, wy);
       for (int k = 0; k < n; ++k) {
@@ -175,8 +183,9 @@ void PixelRenderer::draw_dirty_rects(const World& world, std::uint32_t* pixels, 
   };
   for (int cy = 0; cy < world.height_chunks(); ++cy) {
     for (int cx = 0; cx < world.width_chunks(); ++cx) {
-      const DirtyRect& r = world.chunk(cx, cy).next_dirty;
-      if (r.empty()) continue;
+      const Chunk* chunk = world.chunk_ptr(cx, cy);
+      if (!chunk || chunk->next_dirty.empty()) continue;
+      const DirtyRect& r = chunk->next_dirty;
       const int x0 = (cx << kChunkShift) + r.min_x;
       const int x1 = (cx << kChunkShift) + r.max_x;
       const int y0 = (cy << kChunkShift) + r.min_y;

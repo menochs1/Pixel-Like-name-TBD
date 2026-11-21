@@ -557,13 +557,16 @@ StepStats step_impl(World& world, const ChunkRegion* region) {
 
   for (int cy = 0; cy < hc; ++cy) {
     for (int cx = 0; cx < wc; ++cx) {
-      Chunk& c = world.chunk(cx, cy);
+      Chunk* cp = world.chunk_ptr(cx, cy);
+      if (!cp) continue;  // not loaded
+      Chunk& c = *cp;
       if (region && !active[static_cast<std::size_t>(cy * wc + cx)]) {
         // Paused: keep the pending work for when the region comes back.
         c.dirty.reset();
         stats.paused_chunks += c.next_dirty.empty() ? 0 : 1;
         continue;
       }
+      if (!c.next_dirty.empty()) c.touched = true;  // its pending work is consumed now
       c.dirty = c.next_dirty;
       c.next_dirty.reset();
     }
@@ -574,9 +577,14 @@ StepStats step_impl(World& world, const ChunkRegion* region) {
   // then the next) makes material behave differently at chunk edges: liquids
   // pile up into walls along the 64-pixel grid.
   const bool left_to_right = (tick & 1U) != 0;
+  static const DirtyRect kNothing;  // stands in for unloaded chunks
+  auto dirty_of = [&](int cx, int cy) -> const DirtyRect& {
+    const Chunk* c = world.chunk_ptr(cx, cy);
+    return c ? c->dirty : kNothing;
+  };
   for (int cy = hc - 1; cy >= 0; --cy) {
     for (int cx = 0; cx < wc; ++cx) {
-      const DirtyRect& rect = world.chunk(cx, cy).dirty;
+      const DirtyRect& rect = dirty_of(cx, cy);
       if (rect.empty()) continue;
       ++stats.active_chunks;
       stats.cells_scanned += rect.area();
@@ -585,7 +593,7 @@ StepStats step_impl(World& world, const ChunkRegion* region) {
     for (int ly = kChunkMask; ly >= 0; --ly) {
       for (int i = 0; i < wc; ++i) {
         const int cx = left_to_right ? i : wc - 1 - i;
-        const DirtyRect& rect = world.chunk(cx, cy).dirty;
+        const DirtyRect& rect = dirty_of(cx, cy);
         if (ly < rect.min_y || ly > rect.max_y) continue;  // also skips empty rects
         const int base_x = cx << kChunkShift;
         if (left_to_right) {
