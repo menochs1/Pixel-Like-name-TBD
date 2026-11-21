@@ -25,7 +25,7 @@ materials and the world, and gameplay emerges from the simulation.
 
 ## Engineering priorities
 
-Implement in this order. Progress as of 2026-11-21 (updated after derived materials): ✅ done · 🟡 partly done ·
+Implement in this order. Progress as of 2026-11-21: ✅ done · 🟡 partly done ·
 ⬜ not started.
 
 1. Pixel simulation engine — ✅ Done: powders, liquids (with settling), gases,
