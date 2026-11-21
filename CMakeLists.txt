@@ -80,7 +80,7 @@ endif()
 
 if(PX_BUILD_TESTS)
   enable_testing()
-  add_executable(px_tests tests/test_main.cpp tests/test_simulation.cpp tests/test_world_gen.cpp)
+  add_executable(px_tests tests/test_main.cpp tests/test_simulation.cpp tests/test_world_gen.cpp tests/test_materials.cpp)
   target_link_libraries(px_tests PRIVATE px_core)
   target_compile_options(px_tests PRIVATE ${PX_WARNINGS})
   add_test(NAME px_tests COMMAND px_tests)

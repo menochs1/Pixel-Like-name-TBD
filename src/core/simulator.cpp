@@ -22,7 +22,7 @@ constexpr int kSettleCount = 120;
 constexpr float kHeatRate = 0.25f;
 struct StepContext {
   World& world;
-  const MaterialRegistry& materials;
+  MaterialRegistry& materials;  // reactions may add derived materials
   std::uint32_t tick;
   StepStats& stats;
 };
@@ -72,6 +72,7 @@ void swap_cells(StepContext& ctx, int x0, int y0, int x1, int y1) {
   std::swap(a.material[ia], b.material[ib]);
   std::swap(a.thermal[ia], b.thermal[ib]);  // temperature and shade travel together
   std::swap(a.motion[ia], b.motion[ib]);    // fall speed / flow, or lifetime
+  std::swap(a.health[ia], b.health[ib]);
   a.mark_updated(ia, ctx.tick);
   b.mark_updated(ib, ctx.tick);
   w.wake(x0, y0);
@@ -93,6 +94,7 @@ void transform(StepContext& ctx, int x, int y, MaterialId to, std::uint16_t life
   }
   // At rest, or with its new lifetime (never both: see MaterialProps::uses_motion).
   c.motion[i] = p.uses_motion ? 0 : life;
+  c.health[i] = Chunk::kFullHealth;  // a new material starts intact
   c.mark_updated(i, ctx.tick);
   ctx.world.wake(x, y);
 }
@@ -116,6 +118,8 @@ bool heat_turn(const StepContext& ctx, int x, int y) {
   return ((static_cast<unsigned>(x) + static_cast<unsigned>(y) + ctx.tick) & 1U) == 0;
 }
 
+/// With Apply = false, only reports whether any heat would flow, changing nothing.
+template <bool Apply = true>
 bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
   if (conductivity <= 0.0f) return false;
   World& w = ctx.world;
@@ -137,19 +141,27 @@ bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
     // it would just swap the two values back and forth).
     if (delta == 0 && (tn - t >= 2 || tn - t <= -2)) delta = tn > t ? 1 : -1;
     if (delta == 0) return;
+    flowed = true;
+    if constexpr (!Apply) return;
     t += delta;
     nc.set_temperature(ni, tn - delta);  // clamps
-    flowed = true;
   };
 
   // Neighbour order is fixed (+x, -x, +y, -y) so both paths give identical results.
   if (lx > 0 && lx < kChunkMask && ly > 0 && ly < kChunkMask) {
     // All four neighbours in this chunk: plain index offsets, no coordinate
     // wrapping or chunk lookups (~95% of cells).
-    pair(c, i + 1);
-    pair(c, i - 1);
-    pair(c, i + kChunkSize);
-    pair(c, i - kChunkSize);
+    if constexpr (Apply) {
+      pair(c, i + 1);
+      pair(c, i - 1);
+      pair(c, i + kChunkSize);
+      pair(c, i - kChunkSize);
+    } else {  // check only: stop at the first pair that would flow
+      for (const int ni : {i + 1, i - 1, i + kChunkSize, i - kChunkSize}) {
+        pair(c, ni);
+        if (flowed) return true;
+      }
+    }
   } else {
     static constexpr int kDx[4] = {1, -1, 0, 0};
     static constexpr int kDy[4] = {0, 0, 1, -1};
@@ -157,8 +169,12 @@ bool exchange_heat(StepContext& ctx, int x, int y, float conductivity) {
       const int nx = x + kDx[k], ny = y + kDy[k];
       if (!w.in_bounds(nx, ny)) continue;
       pair(w.chunk_for(nx, ny), World::local_index(nx, ny));
+      if constexpr (!Apply) {
+        if (flowed) return true;
+      }
     }
   }
+  if constexpr (!Apply) return flowed;
   c.set_temperature(i, t);
   // One 5x5 wake covers the 3x3 around this cell and around every neighbour
   // whose temperature changed; waking each separately cost up to 5 wakes per
@@ -347,8 +363,20 @@ int react(StepContext& ctx, int x, int y, MaterialId m, Rng& rng) {
     if (!r) continue;
     result = 0;
     if (rng.chance(r->chance)) {
-      transform(ctx, x, y, r->a_to, 0, rng);
-      transform(ctx, nx, ny, r->b_to, 0, rng);
+      // Products may be derived from both reactants (in their authored roles),
+      // read before either cell changes.
+      const MaterialId first = r->swapped ? n : m, second = r->swapped ? m : n;
+      const MaterialId self_to = r->a_derive ? ctx.materials.derive(r->a_to, *r->a_derive, first, second) : r->a_to;
+      const MaterialId other_to = r->b_derive ? ctx.materials.derive(r->b_to, *r->b_derive, first, second) : r->b_to;
+      transform(ctx, x, y, self_to, 0, rng);
+      transform(ctx, nx, ny, other_to, 0, rng);
+      if (r->heat != 0) {  // released (or absorbed) by the reaction
+        Chunk& c = ctx.world.chunk_for(x, y);
+        Chunk& nc = ctx.world.chunk_for(nx, ny);
+        const int i = World::local_index(x, y), ni = World::local_index(nx, ny);
+        c.set_temperature(i, c.temperature(i) + r->heat);
+        nc.set_temperature(ni, nc.temperature(ni) + r->heat);
+      }
       return 1;
     }
   }
@@ -374,11 +402,15 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
     c.set_temperature(i, p.spawn_temp);
     ctx.world.wake(x, y);
   }
-  // Off-turn cells need not stay awake for heat: any temperature change wakes
-  // the 3x3 (or 5x5) around it, so the neighbour whose turn comes next is awake
-  // and handles the pair.
-  if (c.temperature(i) != kAmbient && heat_turn(ctx, x, y) && exchange_heat(ctx, x, y, p.conductivity)) {
-    keep_awake = true;
+  // A cell off ambient with heat still to exchange stays awake through its
+  // off-turn so it gets its turn: otherwise an exchange with a neighbour that
+  // never runs heat code itself (one at ambient) is skipped, and chunked
+  // simulation drifts from updating every cell. Cells with nothing to exchange
+  // (gaps of 1, insulated) may sleep.
+  if (c.temperature(i) != kAmbient) {
+    const bool flows = heat_turn(ctx, x, y) ? exchange_heat(ctx, x, y, p.conductivity)
+                                            : exchange_heat<false>(ctx, x, y, p.conductivity);
+    if (flows) keep_awake = true;
   }
 
   // Contact reactions.

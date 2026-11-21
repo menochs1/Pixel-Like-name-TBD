@@ -27,7 +27,13 @@ world generation and a world that wraps around:
 - Burning, boiling, condensing, melting and freezing are all one data rule:
   above/below a temperature, turn into another material with some chance.
 - Pair reactions (lava + water → stone + steam, fire + water → doused) come
-  from a reaction table, not engine code.
+  from a reaction table, not engine code. A reaction can **derive** its
+  products from its parents (oil + sand → tar whose density, colour and
+  flammability are mixed from the oil and sand) and release or absorb heat.
+- Per-pixel properties: two pixels of the same element can differ. A pixel
+  with its own density, conductivity, colour, ignition point or flammability
+  holds a derived variant of its element. Each pixel also carries its own
+  temperature and health (wear).
 - Simulation is fully separate from rendering and runs headless.
 - Worlds can wrap around horizontally (`EdgeX::Wrap`): walk far enough to one
   side and you are back where you started. Sand, liquids, heat and painting all
@@ -56,6 +62,7 @@ world generation and a world that wraps around:
 | coal | solid | hard to light (350 °C), smoulders for ~15 s |
 | leaves | solid | ignites at 180 °C, burns fast |
 | basalt | solid | perfect insulator (conductivity 0); seals magma chambers |
+| tar | liquid | made when oil soaks into sand; properties derived from both; burns long and slow |
 
 ## Download (Windows)
 
@@ -253,6 +260,44 @@ registry.finalize();
 Only the first material named in a reaction looks for partners, so name the
 rarer or more active one first.
 
+### Derived materials
+
+A reaction can compute a product's properties from the two cells that
+reacted, instead of producing a fixed material:
+
+```cpp
+px::ReactionDef r;
+r.a = "oil"; r.b = "sand";
+r.a_to = "tar"; r.b_to = "tar";
+r.chance = 0.02f;
+r.heat = 0;                                         // degrees added to both products
+px::Derivation d;
+d.density = {px::Derivation::Op::Mean};             // also A, B, Min, Max, Mix(weight)
+d.color = {px::Derivation::Op::Mix, 0.6f};
+d.ignition = {px::Derivation::Op::A};
+d.flammability = {px::Derivation::Op::Mix, 0.5f};
+r.a_derive = r.b_derive = d;
+registry.add_reaction(r);
+```
+
+- The product element (`tar`) supplies phase and behaviour. Each rule sets one
+  property from the parents: density, conductivity, colour, ignition
+  temperature or flammability. Parents may themselves be derived, so chains
+  of reactions compound.
+- `MaterialRegistry::derive` adds the result to the material table at runtime
+  as a variant of its element (`tar#1`, `tar#2`…). Results are rounded to fixed
+  steps and interned, so equal results share one id and chains converge on a
+  bounded set (tested).
+- Variants react like their base element: the reaction table is indexed by
+  base element, so it stays sized to the authored materials.
+- Up to `kMaxMaterials` (16384) materials exist in total; storage is reserved
+  up front so deriving mid-step never moves the property table. When full,
+  reactions produce the plain element.
+
+This is how pixels hold their own properties without storing every property
+in every pixel. Fixed properties live in a (possibly derived) material;
+changing state (temperature, health, motion) lives in the pixel.
+
 A per-cell bit marks cells that have already moved or updated this step, so
 nothing moves twice. The bits are stamped with the step number and cleared on
 first use in a new step, so chunks a step never touches cost nothing.
@@ -267,13 +312,15 @@ really needs (`src/core/chunk.hpp`):
 | material | 16 | material id |
 | thermal | 16 | temperature (12 bits, −273…3822 °C) + colour shade (4 bits) |
 | motion | 16 | powders/liquids: fall speed or settle count + flow direction; everything else: remaining lifetime |
+| health | 8 | share of the material's durability left (`World::damage`) |
 | updated | 1 | already moved this step |
 
 No material needs both motion and a lifetime, so they share a field. The
 registry rejects a powder or liquid with a lifetime. Simulation code goes
 through accessors (`temperature()`, `flow()`, `life()`…), so the packing stays
 in one place. Packing cut memory from 10 to ~6 bytes per cell with no
-measurable change in speed.
+measurable change in speed; health brings it to 7 (43 MiB for the app world).
+A state-flags byte will join when the first flag (wet, charged…) needs it.
 
 ## Performance
 
@@ -285,7 +332,7 @@ Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
 | Mean step | ~5.0 ms |
 | p95 step | ~8 ms |
 | Cells scanned per step | ~166k |
-| Memory | 6 bytes + 1 bit per cell (~24.6 KiB per chunk; 10M cells ≈ 59 MiB) |
+| Memory | 7 bytes + 1 bit per cell (~28.6 KiB per chunk; 10M cells ≈ 68 MiB) |
 
 `pixel_stress` also covers a small world fully on fire (p95 3.5 ms) and lava
 raining into a lake (p95 3.1 ms). Timings vary run to run on shared machines by
@@ -327,9 +374,15 @@ and steam dragged across the whole view for 50 s) on a 2.1 GHz server core:
   stone in 10 seconds. Temperatures are whole degrees and a 1° gap does not
   flow, so buried layers can settle a degree per layer above ambient.
 - Steam and smoke drift as scattered particles rather than billowing clouds.
-- The world is still one fixed grid of chunks held in memory (37 MiB for the
+- The world is still one fixed grid of chunks held in memory (43 MiB for the
   app world). Generation is already per chunk, so save/load and then chunk
   streaming are the next parts of roadmap step 3.
 - Only horizontal wrapping; the top and bottom are solid.
+- Derived materials are never freed: a variant no cell uses any more keeps its
+  slot until the registry is re-finalized. Rounding keeps the count low in
+  practice; a sweep of unused variants can come with save/load, which must
+  also store the variant table.
+- Nothing deals damage yet (`World::damage` is ready for digging tools and
+  explosions).
 - Flicker (fire, lava) is now purely a rendering effect animated from the
   world tick, so a still lava pool costs the simulation nothing.

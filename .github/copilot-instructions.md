@@ -25,7 +25,7 @@ materials and the world, and gameplay emerges from the simulation.
 
 ## Engineering priorities
 
-Implement in this order. Progress as of 2026-11-21: ✅ done · 🟡 partly done ·
+Implement in this order. Progress as of 2026-11-21 (updated after derived materials): ✅ done · 🟡 partly done ·
 ⬜ not started.
 
 1. Pixel simulation engine — ✅ Done: powders, liquids (with settling), gases,
@@ -34,11 +34,11 @@ Implement in this order. Progress as of 2026-11-21: ✅ done · 🟡 partly done
 2. Chunk management — ✅ Done for an in-memory world: 64×64 SoA chunks,
    dirty rects and sleeping, simulating only around the camera, horizontal
    wrapping. Chunk streaming (loading/unloading) is still to do.
-3. Data-driven material interactions — 🟡 Partly done: materials, temperature
-   transitions and pair reactions are all data. Not yet done: per-pixel
-   properties that differ from the material (density, conductivity,
-   flammability, durability, state flags), derived materials computed from
-   their parents, and reactions that emit heat.
+3. Data-driven material interactions — ✅ Done: materials, temperature
+   transitions and pair reactions are data. Reactions can derive products from
+   their parents (runtime variants, interned) and release heat. Pixels can hold
+   their own properties via variants, plus per-pixel temperature and health.
+   A state-flags byte is planned for when the first flag is needed.
 4. Deterministic world generation — 🟡 Partly done: seeded, chunk-independent
    generation with biomes, caves, pools, deposits and a wrapping seam is done.
    Save/load is not started.

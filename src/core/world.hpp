@@ -25,10 +25,11 @@ enum class EdgeX : std::uint8_t {
 /// local coordinates never need wrapping, only chunk indices.
 ///
 /// The world holds a pointer to its MaterialRegistry; the registry must outlive it.
+/// The simulation may add derived materials to it while stepping.
 /// World is pure data: it has no knowledge of rendering.
 class World {
  public:
-  World(int width_chunks, int height_chunks, const MaterialRegistry& materials, std::uint64_t seed,
+  World(int width_chunks, int height_chunks, MaterialRegistry& materials, std::uint64_t seed,
         EdgeX edge_x = EdgeX::Wall);
 
   int width() const { return width_; }
@@ -38,6 +39,7 @@ class World {
   std::uint64_t seed() const { return seed_; }
   std::uint32_t tick() const { return tick_; }
   const MaterialRegistry& materials() const { return *materials_; }
+  MaterialRegistry& materials() { return *materials_; }
   bool wraps_x() const { return wrap_x_; }
 
   /// Maps x into [0, width) on a wrapping world; returns it unchanged otherwise.
@@ -69,6 +71,14 @@ class World {
   }
   /// Clamped to the storable range, Chunk::kMinTemp..Chunk::kMaxTemp.
   void set_temperature(int x, int y, int t);
+
+  /// Share of the cell's durability left, 0..255 (255 = intact, also outside the world).
+  int health(int x, int y) const { return in_bounds(x, y) ? chunk_for(x, y).health[local_index(x, y)] : 255; }
+  /// Deals `amount` damage, in the same units as MaterialDef::durability. A cell
+  /// whose health runs out breaks (becomes empty); a material with durability 0
+  /// breaks at once. Empty cells and cells outside the world take no damage.
+  /// Returns true if the cell broke.
+  bool damage(int x, int y, int amount);
 
   void fill_rect(int x, int y, int w, int h, MaterialId material);
   /// Fills a disc. `coverage` in (0, 1] places material in that fraction of cells
@@ -120,7 +130,7 @@ class World {
   int height_chunks_;
   int width_;
   int height_;
-  const MaterialRegistry* materials_;
+  MaterialRegistry* materials_;
   std::uint64_t seed_;
   std::uint32_t tick_ = 0;
   bool wrap_x_;

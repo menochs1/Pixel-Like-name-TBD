@@ -1,9 +1,12 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace px {
@@ -15,6 +18,10 @@ using Temperature = std::int16_t;  // degrees Celsius
 inline constexpr MaterialId kEmpty = 0;
 /// Returned by World::get for coordinates outside the world. Never stored in a cell.
 inline constexpr MaterialId kOutOfBounds = 0xFFFF;
+/// Upper bound on materials, authored plus derived. Storage for this many is
+/// reserved up front so that deriving a material mid-step never moves the
+/// property table (the simulator holds references into it).
+inline constexpr std::size_t kMaxMaterials = 16384;
 /// Temperature that air relaxes toward and that new cells start at by default.
 inline constexpr Temperature kAmbient = 20;
 
@@ -76,7 +83,7 @@ struct MaterialDef {
   std::string emits;
   float emit_chance = 0.0f;
 
-  std::uint16_t durability = 0;  // reserved: digging / explosions (steps 4, 5)
+  std::uint16_t durability = 0;  // damage a cell takes before it breaks (World::damage); 0 = breaks at once
 };
 
 /// Hot, resolved per-material properties used by the simulator's inner loop.
@@ -111,13 +118,57 @@ struct MaterialProps {
   /// Powders and liquids: the cell's motion field holds fall speed and flow
   /// direction. Everything else: it holds the remaining lifetime.
   bool uses_motion = false;
+  /// The authored element this material is, or a variant of. Equal to its own
+  /// id for authored materials. Reactions are looked up by base element, so a
+  /// variant of tar reacts like tar.
+  MaterialId base = kEmpty;
+  std::uint16_t durability = 0;
 };
 
-/// When `a` touches `b`, with `chance` per step, `a` becomes `a_to` and `b`
-/// becomes `b_to`. Checked in both orders.
+/// How a reaction computes a product's properties from its two parents, the
+/// reacting cells (which may themselves be derived). Each property has its own
+/// rule; the product's element supplies phase, behaviour and anything without
+/// a rule. The result is interned as a variant of the product element, so equal
+/// results share one material id.
+struct Derivation {
+  enum class Op : std::uint8_t {
+    Product,  // keep the product element's own value
+    A,        // copy from the first-named reactant
+    B,        // copy from the second-named reactant
+    Mean,     // average of both
+    Min,
+    Max,
+    Mix,      // weight * A + (1 - weight) * B
+  };
+  struct Rule {
+    Op op = Op::Product;
+    float weight = 0.5f;  // Mix only
+  };
+  Rule density;       // kg/m^3: sinking and floating
+  Rule conductivity;  // heat flow
+  Rule color;         // per channel
+  Rule ignition;      // high-transition temperature (ignition / melting point)
+  Rule flammability;  // high-transition chance per step
+};
+
+/// A pair reaction as authored: when `a` touches `b`, with `chance` per step,
+/// `a` becomes `a_to` and `b` becomes `b_to`. Either product may be derived
+/// from both reactants, and the reaction may release (or absorb) heat.
+struct ReactionDef {
+  std::string a, b, a_to, b_to;
+  float chance = 1.0f;
+  int heat = 0;  // degrees added to both products (negative absorbs heat)
+  std::optional<Derivation> a_derive, b_derive;
+};
+
+/// A resolved reaction, as seen from the acting cell `a` (stored in both orders).
 struct Reaction {
-  MaterialId a, b, a_to, b_to;
+  MaterialId a, b, a_to, b_to;  // base elements
   std::uint16_t chance;
+  std::int16_t heat;
+  const Derivation* a_derive;   // nullptr: product is a_to as authored
+  const Derivation* b_derive;
+  bool swapped;                 // stored with the authored roles of a and b exchanged
 };
 
 /// Owns all material definitions and the reaction table.
@@ -132,9 +183,21 @@ class MaterialRegistry {
   /// neighbours for lava each step would make all water ~50% more expensive.
   void add_reaction(std::string_view a, std::string_view b, std::string_view a_to, std::string_view b_to,
                     float chance);
+  /// Adds a reaction that may derive its products and release heat.
+  void add_reaction(ReactionDef def);
   /// Resolves names into ids and builds lookup tables. Must be called after the
   /// last add()/add_reaction() and before simulating. Throws on unknown names.
+  /// Discards any derived materials (their ids would no longer be valid).
   void finalize();
+
+  /// The variant of `product` whose properties `rule` computes from parents
+  /// `a` and `b`. Returns an existing material when the (rounded) result
+  /// matches one, so repeated reactions reuse ids. Deterministic: the same
+  /// sequence of calls gives the same ids. When the table is full, returns
+  /// `product` itself.
+  MaterialId derive(MaterialId product, const Derivation& rule, MaterialId a, MaterialId b);
+  /// Number of materials created by derive().
+  std::size_t derived_count() const { return derived_; }
 
   const MaterialDef& def(MaterialId id) const { return defs_[id]; }
   const MaterialProps& props(MaterialId id) const { return props_[id]; }
@@ -147,22 +210,35 @@ class MaterialRegistry {
   MaterialId require(std::string_view name) const;  // throws if missing
 
   /// Reaction where `a` is the acting cell and `b` its neighbour, or nullptr.
-  /// Both orders are stored, so callers never need to swap arguments.
+  /// Both orders are stored, so callers never need to swap arguments. Looked
+  /// up by base element: variants react like the element they derive from.
   const Reaction* reaction(MaterialId a, MaterialId b) const {
-    const std::int32_t i = reaction_index_[static_cast<std::size_t>(a) * defs_.size() + b];
-    return i < 0 ? nullptr : &reactions_[static_cast<std::size_t>(i)];
+    const std::size_t i = static_cast<std::size_t>(props_[a].base) * authored_count_ + props_[b].base;
+    const std::int32_t r = reaction_index_[i];
+    return r < 0 ? nullptr : &reactions_[static_cast<std::size_t>(r)];
   }
 
  private:
-  struct PendingReaction {
-    std::string a, b, a_to, b_to;
-    float chance;
+  struct VariantKey {
+    MaterialId base;
+    std::int32_t density, conductivity, ignition, flammability;
+    std::uint8_t r, g, b;
+    bool operator==(const VariantKey&) const = default;
   };
+  struct VariantKeyHash {
+    std::size_t operator()(const VariantKey& k) const;
+  };
+  MaterialProps resolve(const MaterialDef& d) const;
+
   std::vector<MaterialDef> defs_;
   std::vector<MaterialProps> props_;
-  std::vector<PendingReaction> pending_reactions_;
+  std::vector<ReactionDef> pending_reactions_;
   std::vector<Reaction> reactions_;
-  std::vector<std::int32_t> reaction_index_;  // size()^2 dense table, -1 = none
+  std::vector<std::unique_ptr<Derivation>> derivations_;  // stable addresses for Reaction
+  std::vector<std::int32_t> reaction_index_;  // authored_count_^2 dense table, -1 = none
+  std::size_t authored_count_ = 0;  // materials known at the last finalize()
+  std::size_t derived_ = 0;         // materials created by derive() since then (they follow the authored ones)
+  std::unordered_map<VariantKey, MaterialId, VariantKeyHash> variants_;
 };
 
 /// Ids of the built-in materials.
@@ -184,6 +260,7 @@ struct BaseMaterials {
   MaterialId coal = kEmpty;
   MaterialId leaves = kEmpty;
   MaterialId basalt = kEmpty;
+  MaterialId tar = kEmpty;
 };
 
 /// Registers the built-in materials and reactions, finalizes the registry and

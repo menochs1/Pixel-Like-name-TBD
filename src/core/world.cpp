@@ -7,7 +7,7 @@
 
 namespace px {
 
-World::World(int width_chunks, int height_chunks, const MaterialRegistry& materials, std::uint64_t seed,
+World::World(int width_chunks, int height_chunks, MaterialRegistry& materials, std::uint64_t seed,
              EdgeX edge_x)
     : width_chunks_(width_chunks),
       height_chunks_(height_chunks),
@@ -32,6 +32,7 @@ void World::set(int x, int y, MaterialId material) {
   c.set_shade(i, cell_hash(seed_, x, y, 0) & 0x0F);
   c.set_temperature(i, p.spawn_temp);  // ambient unless the material defines one
   c.motion[i] = 0;                    // at rest, no lifetime
+  c.health[i] = Chunk::kFullHealth;
   if (p.lifetime_max > 0) {
     const std::uint32_t span = static_cast<std::uint32_t>(p.lifetime_max - p.lifetime_min) + 1;
     c.set_life(i, static_cast<std::uint16_t>(p.lifetime_min + cell_hash(seed_ ^ 0x11FE, x, y, tick_) % span));
@@ -44,6 +45,22 @@ void World::set_temperature(int x, int y, int t) {
   if (!in_bounds(x, y)) return;
   chunk_for(x, y).set_temperature(local_index(x, y), t);
   wake(x, y);
+}
+
+bool World::damage(int x, int y, int amount) {
+  if (!in_bounds(x, y) || amount <= 0) return false;
+  Chunk& c = chunk_for(x, y);
+  const int i = local_index(x, y);
+  if (c.material[i] == kEmpty) return false;
+  const int durability = materials_->props(c.material[i]).durability;
+  // Health is a share of durability: convert the damage, rounding up so any hit counts.
+  const int loss = durability == 0 ? 256 : (amount * 255 + durability - 1) / durability;
+  if (loss >= c.health[i]) {
+    set(x, y, kEmpty);
+    return true;
+  }
+  c.health[i] = static_cast<std::uint8_t>(c.health[i] - loss);
+  return false;
 }
 
 void World::fill_rect(int x, int y, int w, int h, MaterialId material) {

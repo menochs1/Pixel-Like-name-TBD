@@ -19,13 +19,20 @@ namespace {
 std::uint32_t heat_color(int t);
 }  // namespace
 
-PixelRenderer::PixelRenderer(const MaterialRegistry& materials) {
+PixelRenderer::PixelRenderer(const MaterialRegistry& materials) : materials_(&materials) {
   heat_lut_.resize(static_cast<std::size_t>(kHeatLutMax - kHeatLutMin + 1));
   for (int t = kHeatLutMin; t <= kHeatLutMax; ++t) heat_lut_[static_cast<std::size_t>(t - kHeatLutMin)] = heat_color(t);
-  palette_.resize(materials.size());
-  flicker_.resize(materials.size());
-  for (std::size_t id = 0; id < materials.size(); ++id) {
-    const MaterialDef& def = materials.def(static_cast<MaterialId>(id));
+  sync_palette();
+}
+
+void PixelRenderer::sync_palette() const {
+  const std::size_t n = materials_->size();
+  if (palette_.size() > n) palette_.clear();  // the registry was re-finalized: rebuild
+  const std::size_t from = palette_.size();
+  palette_.resize(n);
+  flicker_.resize(n);
+  for (std::size_t id = from; id < n; ++id) {
+    const MaterialDef& def = materials_->def(static_cast<MaterialId>(id));
     flicker_[id] = def.flicker ? 1 : 0;
     for (int s = 0; s < kShades; ++s) {
       // Map shade 0..15 to -variation..+variation brightness.
@@ -101,6 +108,7 @@ void for_each_run(const World& world, const Viewport& v, Fn&& fn) {
 }  // namespace
 
 void PixelRenderer::render(const World& world, std::uint32_t* pixels, int pitch, Viewport view) const {
+  sync_palette();
   const Viewport v = resolve(world, view);
   const std::uint32_t tick = world.tick();
   for (int sy = 0; sy < v.height; ++sy) {

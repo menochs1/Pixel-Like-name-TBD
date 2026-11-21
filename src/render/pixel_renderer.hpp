@@ -38,8 +38,12 @@ class PixelRenderer {
 
  private:
   static constexpr int kShades = 16;
-  std::vector<std::array<std::uint32_t, kShades>> palette_;
-  std::vector<std::uint8_t> flicker_;  // per material
+  /// Adds colours for materials derived since the last frame (the simulation
+  /// can create them at any step).
+  void sync_palette() const;
+  const MaterialRegistry* materials_;
+  mutable std::vector<std::array<std::uint32_t, kShades>> palette_;
+  mutable std::vector<std::uint8_t> flicker_;  // per material
   // Heat-view colour per temperature, precomputed: interpolating the colour
   // ramp per pixel made the heat view ~5x slower to draw than the normal view.
   static constexpr int kHeatLutMin = -300, kHeatLutMax = 2000;

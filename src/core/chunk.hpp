@@ -37,8 +37,8 @@ struct DirtyRect {
 /// A 64x64 block of cells stored as a structure of arrays. Each array is
 /// indexed by (local_y << kChunkShift) | local_x.
 ///
-/// Memory: 6 bytes per cell plus one bit, packed by what each field really
-/// needs (~24.5 KiB per chunk; a 10-million-cell world is ~59 MiB):
+/// Memory: 7 bytes per cell plus one bit, packed by what each field really
+/// needs (~28.5 KiB per chunk; a 10-million-cell world is ~68 MiB):
 ///
 ///   material  16 bits  material id (room for many generated materials)
 ///   thermal   16 bits  temperature + 273 in the low 12 bits (-273..3822 C),
@@ -47,7 +47,13 @@ struct DirtyRect {
 ///                      low 8 bits) and flow direction (bits 8-9);
 ///                      everything else: remaining lifetime in steps (0 = none).
 ///                      A cell never needs both, so they share the field.
+///   health     8 bits  share of the material's durability left (255 = intact)
 ///   updated    1 bit   moved or updated during the current step (see below)
+///
+/// Properties that are fixed for a cell (density, conductivity, colour,
+/// ignition point, flammability) are not stored per cell: a cell whose
+/// properties differ from its element holds the id of a derived material
+/// (MaterialRegistry::derive) that has them.
 ///
 /// Use the accessors rather than the raw arrays, so the packing stays in one place.
 struct Chunk {
@@ -58,6 +64,7 @@ struct Chunk {
   std::array<MaterialId, kChunkArea> material{};
   std::array<std::uint16_t, kChunkArea> thermal{};
   std::array<std::uint16_t, kChunkArea> motion{};
+  std::array<std::uint8_t, kChunkArea> health{};
 
   /// One bit per cell: updated during step `updated_tick`. Bits from an older
   /// step are stale and cleared on first use (see was_updated), so chunks the
@@ -68,7 +75,12 @@ struct Chunk {
   DirtyRect dirty;       // being processed this step (can grow mid-step)
   DirtyRect next_dirty;  // collected this step, processed next step
 
-  Chunk() { thermal.fill(static_cast<std::uint16_t>(kAmbient + kTempBias)); }
+  static constexpr std::uint8_t kFullHealth = 255;
+
+  Chunk() {
+    thermal.fill(static_cast<std::uint16_t>(kAmbient + kTempBias));
+    health.fill(kFullHealth);
+  }
 
   static constexpr int index(int local_x, int local_y) { return (local_y << kChunkShift) | local_x; }
 

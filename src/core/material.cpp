@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <climits>
+#include <string>
 #include <utility>
 
 namespace px {
@@ -26,7 +28,13 @@ MaterialRegistry::MaterialRegistry() {
 }
 
 MaterialId MaterialRegistry::add(MaterialDef def) {
-  if (defs_.size() >= kOutOfBounds) throw std::length_error("MaterialRegistry: too many materials");
+  if (derived_ > 0) {  // derived ids are about to become invalid anyway (see finalize)
+    defs_.resize(defs_.size() - derived_);
+    props_.resize(props_.size() - derived_);
+    variants_.clear();
+    derived_ = 0;
+  }
+  if (defs_.size() >= kMaxMaterials) throw std::length_error("MaterialRegistry: too many materials");
   if (find(def.name)) throw std::invalid_argument("MaterialRegistry: duplicate material name '" + def.name + "'");
   const auto id = static_cast<MaterialId>(defs_.size());
   defs_.push_back(std::move(def));
@@ -35,8 +43,16 @@ MaterialId MaterialRegistry::add(MaterialDef def) {
 
 void MaterialRegistry::add_reaction(std::string_view a, std::string_view b, std::string_view a_to,
                                     std::string_view b_to, float chance) {
-  pending_reactions_.push_back({std::string(a), std::string(b), std::string(a_to), std::string(b_to), chance});
+  ReactionDef r;
+  r.a = a;
+  r.b = b;
+  r.a_to = a_to;
+  r.b_to = b_to;
+  r.chance = chance;
+  add_reaction(std::move(r));
 }
+
+void MaterialRegistry::add_reaction(ReactionDef def) { pending_reactions_.push_back(std::move(def)); }
 
 std::optional<MaterialId> MaterialRegistry::find(std::string_view name) const {
   for (std::size_t i = 0; i < defs_.size(); ++i) {
@@ -51,42 +67,66 @@ MaterialId MaterialRegistry::require(std::string_view name) const {
   throw std::invalid_argument("MaterialRegistry: unknown material '" + std::string(name) + "'");
 }
 
+namespace {
+
+/// Materials that need state updates even at ambient temperature with no lifetime running.
+bool active_at_ambient(const MaterialProps& p) {
+  return p.emits_heat || p.has_reactions || p.lifetime_max > 0 || p.emit_chance > 0 ||
+         (p.has_spawn_temp && p.spawn_temp != kAmbient) || (p.has_high && kAmbient >= p.high_temp) ||
+         (p.has_low && kAmbient <= p.low_temp);
+}
+
+}  // namespace
+
+MaterialProps MaterialRegistry::resolve(const MaterialDef& d) const {
+  MaterialProps p;
+  p.phase = d.phase;
+  p.density = d.density;
+  p.dispersion = d.dispersion;
+  p.rise_chance = to_chance(d.rise_chance);
+  p.conductivity = std::clamp(d.conductivity, 0.0f, 1.0f);
+  p.has_spawn_temp = d.spawn_temperature.has_value();
+  p.spawn_temp = d.spawn_temperature.value_or(kAmbient);
+  p.emits_heat = d.emits_heat && p.has_spawn_temp;
+  p.flicker = d.flicker;
+  if (d.high_temp) {
+    p.has_high = true;
+    p.high_temp = *d.high_temp;
+    p.high_to = require(d.high_to);
+    p.high_chance = to_chance(d.high_chance);
+  }
+  if (d.low_temp) {
+    p.has_low = true;
+    p.low_temp = *d.low_temp;
+    p.low_to = require(d.low_to);
+    p.low_chance = to_chance(d.low_chance);
+  }
+  p.burn_time = d.burn_time;
+  p.lifetime_min = d.lifetime_min;
+  p.lifetime_max = std::max(d.lifetime_min, d.lifetime_max);
+  p.decay_to = require(d.decay_to);
+  p.decay_chance = to_chance(d.decay_chance);
+  p.emits = require(d.emits);
+  p.emit_chance = to_chance(d.emit_chance);
+  p.uses_motion = d.phase == Phase::Powder || d.phase == Phase::Liquid;
+  p.durability = d.durability;
+  return p;
+}
+
 void MaterialRegistry::finalize() {
-  props_.assign(defs_.size(), MaterialProps{});
+  if (derived_ > 0) {
+    defs_.resize(defs_.size() - derived_);
+    variants_.clear();
+    derived_ = 0;
+  }
+  authored_count_ = defs_.size();
+  props_.clear();
+  props_.reserve(kMaxMaterials);  // never reallocates afterwards: see kMaxMaterials
   for (std::size_t i = 0; i < defs_.size(); ++i) {
-    const MaterialDef& d = defs_[i];
-    MaterialProps& p = props_[i];
-    p.phase = d.phase;
-    p.density = d.density;
-    p.dispersion = d.dispersion;
-    p.rise_chance = to_chance(d.rise_chance);
-    p.conductivity = std::clamp(d.conductivity, 0.0f, 1.0f);
-    p.has_spawn_temp = d.spawn_temperature.has_value();
-    p.spawn_temp = d.spawn_temperature.value_or(kAmbient);
-    p.emits_heat = d.emits_heat && p.has_spawn_temp;
-    p.flicker = d.flicker;
-    if (d.high_temp) {
-      p.has_high = true;
-      p.high_temp = *d.high_temp;
-      p.high_to = require(d.high_to);
-      p.high_chance = to_chance(d.high_chance);
-    }
-    if (d.low_temp) {
-      p.has_low = true;
-      p.low_temp = *d.low_temp;
-      p.low_to = require(d.low_to);
-      p.low_chance = to_chance(d.low_chance);
-    }
-    p.burn_time = d.burn_time;
-    p.lifetime_min = d.lifetime_min;
-    p.lifetime_max = std::max(d.lifetime_min, d.lifetime_max);
-    p.decay_to = require(d.decay_to);
-    p.decay_chance = to_chance(d.decay_chance);
-    p.emits = require(d.emits);
-    p.emit_chance = to_chance(d.emit_chance);
-    p.uses_motion = d.phase == Phase::Powder || d.phase == Phase::Liquid;
-    if (p.uses_motion && p.lifetime_max > 0) {
-      throw std::invalid_argument("MaterialRegistry: '" + d.name +
+    props_.push_back(resolve(defs_[i]));
+    props_.back().base = static_cast<MaterialId>(i);
+    if (props_.back().uses_motion && props_.back().lifetime_max > 0) {
+      throw std::invalid_argument("MaterialRegistry: '" + defs_[i].name +
                                   "' is a powder or liquid with a lifetime; only solids and gases can expire");
     }
   }
@@ -97,34 +137,140 @@ void MaterialRegistry::finalize() {
                                   "' has a burn_time but turns into a powder or liquid, which cannot expire");
     }
   }
-  // After reactions are known (has_reactions), flag materials that need state
-  // updates even at ambient temperature.
-  auto flag_active = [&]() {
-    for (MaterialProps& p : props_) {
-      p.active_at_ambient = p.emits_heat || p.has_reactions || p.lifetime_max > 0 || p.emit_chance > 0 ||
-                            (p.has_spawn_temp && p.spawn_temp != kAmbient) ||
-                            (p.has_high && kAmbient >= p.high_temp) || (p.has_low && kAmbient <= p.low_temp);
-    }
-  };
 
   reactions_.clear();
-  reaction_index_.assign(defs_.size() * defs_.size(), -1);
-  auto put = [&](MaterialId a, MaterialId b, MaterialId a_to, MaterialId b_to, std::uint16_t chance) {
-    reaction_index_[static_cast<std::size_t>(a) * defs_.size() + b] = static_cast<std::int32_t>(reactions_.size());
-    reactions_.push_back({a, b, a_to, b_to, chance});
+  derivations_.clear();
+  reaction_index_.assign(authored_count_ * authored_count_, -1);
+  auto put = [&](MaterialId a, MaterialId b, MaterialId a_to, MaterialId b_to, std::uint16_t chance,
+                 std::int16_t heat, const Derivation* ad, const Derivation* bd, bool swapped) {
+    reaction_index_[static_cast<std::size_t>(a) * authored_count_ + b] = static_cast<std::int32_t>(reactions_.size());
+    reactions_.push_back({a, b, a_to, b_to, chance, heat, ad, bd, swapped});
   };
-  for (const PendingReaction& r : pending_reactions_) {
+  auto keep = [&](const std::optional<Derivation>& d) -> const Derivation* {
+    if (!d) return nullptr;
+    derivations_.push_back(std::make_unique<Derivation>(*d));
+    return derivations_.back().get();
+  };
+  for (const ReactionDef& r : pending_reactions_) {
     const MaterialId a = require(r.a), b = require(r.b);
     const MaterialId a_to = require(r.a_to), b_to = require(r.b_to);
     const std::uint16_t chance = to_chance(r.chance);
-    put(a, b, a_to, b_to, chance);
-    if (a != b) put(b, a, b_to, a_to, chance);
+    const auto heat = static_cast<std::int16_t>(std::clamp(r.heat, -4000, 4000));
+    const Derivation* ad = keep(r.a_derive);
+    const Derivation* bd = keep(r.b_derive);
+    put(a, b, a_to, b_to, chance, heat, ad, bd, false);
+    if (a != b) put(b, a, b_to, a_to, chance, heat, bd, ad, true);
     // Only the first-named material looks for partners; one side checking is
     // enough to find every contact. Name the rarer / more active material
     // first (lava before water) so common materials stay on the fast path.
     props_[a].has_reactions = true;
   }
-  flag_active();
+  for (MaterialProps& p : props_) p.active_at_ambient = active_at_ambient(p);
+}
+
+// ------------------------------------------------------------------ derived materials
+
+std::size_t MaterialRegistry::VariantKeyHash::operator()(const VariantKey& k) const {
+  std::uint64_t h = 1469598103934665603ULL;
+  auto mix = [&](std::uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
+  mix(k.base);
+  mix(static_cast<std::uint32_t>(k.density));
+  mix(static_cast<std::uint32_t>(k.conductivity));
+  mix(static_cast<std::uint32_t>(k.ignition));
+  mix(static_cast<std::uint32_t>(k.flammability));
+  mix((static_cast<std::uint32_t>(k.r) << 16) | (static_cast<std::uint32_t>(k.g) << 8) | k.b);
+  return static_cast<std::size_t>(h);
+}
+
+namespace {
+
+float apply(const Derivation::Rule& rule, float product, float a, float b) {
+  switch (rule.op) {
+    case Derivation::Op::Product: return product;
+    case Derivation::Op::A: return a;
+    case Derivation::Op::B: return b;
+    case Derivation::Op::Mean: return (a + b) * 0.5f;
+    case Derivation::Op::Min: return std::min(a, b);
+    case Derivation::Op::Max: return std::max(a, b);
+    case Derivation::Op::Mix: return rule.weight * a + (1.0f - rule.weight) * b;
+  }
+  return product;
+}
+
+// Derived values are rounded to these steps before interning, so long chains
+// of reactions converge on a bounded set of variants instead of minting a new
+// one for every tiny difference.
+constexpr float kDensityStep = 10.0f;        // kg/m^3
+constexpr float kConductivityStep = 0.01f;
+constexpr float kIgnitionStep = 5.0f;        // degrees
+constexpr float kFlammabilityStep = 0.001f;  // chance per step
+
+std::int32_t quantize(float v, float step) { return static_cast<std::int32_t>(std::lround(v / step)); }
+
+}  // namespace
+
+MaterialId MaterialRegistry::derive(MaterialId product, const Derivation& rule, MaterialId a, MaterialId b) {
+  product = props_[product].base;
+  const MaterialDef& pd = defs_[product];
+  const MaterialDef& da = defs_[a];
+  const MaterialDef& db = defs_[b];
+
+  const float density = apply(rule.density, pd.density, da.density, db.density);
+  const float conductivity = std::clamp(apply(rule.conductivity, pd.conductivity, da.conductivity, db.conductivity), 0.0f, 1.0f);
+  auto channel = [&](std::uint8_t p, std::uint8_t x, std::uint8_t y) {
+    return static_cast<std::uint8_t>(std::clamp(std::lround(apply(rule.color, p, x, y)), 0L, 255L));
+  };
+  const Color color{channel(pd.color.r, da.color.r, db.color.r), channel(pd.color.g, da.color.g, db.color.g),
+                    channel(pd.color.b, da.color.b, db.color.b)};
+  // Ignition and flammability only mean something if the product element has a
+  // high transition. A parent without one counts as non-flammable (chance 0)
+  // and lends no ignition temperature (the other parent's is used).
+  std::optional<Temperature> ignition = pd.high_temp;
+  float flammability = pd.high_temp ? pd.high_chance : 0.0f;
+  if (pd.high_temp) {
+    const float pt = *pd.high_temp;
+    const float at = da.high_temp ? *da.high_temp : (db.high_temp ? *db.high_temp : pt);
+    const float bt = db.high_temp ? *db.high_temp : at;
+    ignition = static_cast<Temperature>(std::lround(apply(rule.ignition, pt, at, bt)));
+    flammability = std::clamp(apply(rule.flammability, pd.high_chance, da.high_temp ? da.high_chance : 0.0f,
+                                    db.high_temp ? db.high_chance : 0.0f),
+                              0.0f, 1.0f);
+  }
+
+  auto key_of = [&](MaterialId base, float dens, float cond, std::optional<Temperature> ign, float flam, Color c) {
+    return VariantKey{base,
+                      quantize(dens, kDensityStep),
+                      quantize(cond, kConductivityStep),
+                      ign ? quantize(*ign, kIgnitionStep) : INT32_MIN,
+                      quantize(flam, kFlammabilityStep),
+                      c.r, c.g, c.b};
+  };
+  const VariantKey key = key_of(product, density, conductivity, ignition, flammability, color);
+  if (key == key_of(product, pd.density, pd.conductivity, pd.high_temp, pd.high_temp ? pd.high_chance : 0.0f, pd.color)) {
+    return product;  // no different from the element itself
+  }
+  if (auto it = variants_.find(key); it != variants_.end()) return it->second;
+  if (props_.size() >= kMaxMaterials) return product;  // full: fall back to the plain element
+
+  MaterialDef v = pd;
+  v.name = pd.name + "#" + std::to_string(derived_ + 1);
+  v.density = static_cast<float>(key.density) * kDensityStep;
+  v.conductivity = static_cast<float>(key.conductivity) * kConductivityStep;
+  v.color = color;
+  if (ignition) {
+    v.high_temp = static_cast<Temperature>(key.ignition * static_cast<std::int32_t>(kIgnitionStep));
+    v.high_chance = static_cast<float>(key.flammability) * kFlammabilityStep;
+  }
+  const auto id = static_cast<MaterialId>(defs_.size());
+  MaterialProps p = resolve(v);
+  p.base = product;
+  p.has_reactions = props_[product].has_reactions;
+  p.active_at_ambient = active_at_ambient(p);
+  defs_.push_back(std::move(v));
+  props_.push_back(p);  // within the reserved capacity: references stay valid
+  variants_.emplace(key, id);
+  ++derived_;
+  return id;
 }
 
 BaseMaterials register_base_materials(MaterialRegistry& registry) {
@@ -372,11 +518,52 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     ids.basalt = add(d);
   }
 
+  {
+    // Oil-soaked sand. The defaults here are only a fallback: tar made by the
+    // oil + sand reaction below takes its density, colour, ignition point and
+    // flammability from the oil and sand it came from.
+    MaterialDef d;
+    d.name = "tar";
+    d.phase = Phase::Liquid;
+    d.density = 1200;
+    d.color = {58, 44, 30};
+    d.color_variation = 10;
+    d.dispersion = 1;  // barely flows
+    d.conductivity = 0.25f;
+    d.high_temp = 220;
+    d.high_to = "fire";
+    d.high_chance = 0.05f;
+    d.burn_time = 400;  // burns long and slow
+    d.durability = 30;
+    ids.tar = add(d);
+  }
+
   // Pair reactions for contact effects that temperature alone does not give.
   registry.add_reaction("lava", "water", "stone", "steam", 0.35f);
   registry.add_reaction("fire", "water", "smoke", "steam", 0.5f);    // doused
   registry.add_reaction("flame", "water", "empty", "water", 1.0f);   // snuffed
   registry.add_reaction("lava", "ice", "stone", "water", 0.3f);
+
+  // Derived product: oil soaks into sand and both become tar whose properties
+  // come from its parents. Heavier than oil (so it sinks through it), darker
+  // than sand, and only half as eager to burn as oil, since sand does not burn.
+  {
+    ReactionDef r;
+    r.a = "oil";  // the rarer partner scans for contacts
+    r.b = "sand";
+    r.a_to = "tar";
+    r.b_to = "tar";
+    r.chance = 0.02f;  // soaks in over a few seconds
+    Derivation d;
+    d.density = {Derivation::Op::Mean};
+    d.conductivity = {Derivation::Op::Mean};
+    d.color = {Derivation::Op::Mix, 0.6f};          // mostly oil-dark
+    d.ignition = {Derivation::Op::A};               // oil's ignition point
+    d.flammability = {Derivation::Op::Mix, 0.5f};   // diluted by the sand
+    r.a_derive = d;
+    r.b_derive = d;
+    registry.add_reaction(std::move(r));
+  }
 
   registry.finalize();
   return ids;

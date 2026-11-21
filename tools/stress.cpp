@@ -96,7 +96,7 @@ Timing time_steps(px::World& w, int steps) {
   return r;
 }
 
-void load_scenario(const char* name, int wc, int hc, int steps, const px::MaterialRegistry& reg,
+void load_scenario(const char* name, int wc, int hc, int steps, px::MaterialRegistry& reg,
                    const std::function<void(px::World&)>& build) {
   // Burning and reactions create and destroy material by design; only
   // scenarios without them must conserve every material exactly.
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     px::build_demo_scene(w, ids);
     const px::MaterialId palette[] = {px::kEmpty, ids.stone, ids.sand,  ids.water, ids.oil,  ids.wood,
                                       ids.fire,   ids.flame, ids.smoke, ids.steam, ids.lava, ids.ice,
-                                      ids.dirt,   ids.grass, ids.coal,  ids.leaves, ids.basalt};
+                                      ids.dirt,   ids.grass, ids.coal,  ids.leaves, ids.basalt, ids.tar};
     std::uint32_t seed = 777;
     auto rnd = [&](int n) {
       seed = px::hash32(seed + 0x9E3779B9U);
