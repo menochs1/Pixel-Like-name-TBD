@@ -16,6 +16,28 @@ enum class EdgeX : std::uint8_t {
   Wrap,  // x wraps around: walking off the right edge comes back in on the left
 };
 
+/// The sky: where clouds float and how the wind blows. Part of the world's
+/// rules (the simulation reads it), not of its data: saves do not store it.
+struct Weather {
+  /// Materials that hover (cloud) rise no higher than this row and sink back
+  /// if above it, so cloud collects in a layer just below it. Off: they rise
+  /// until something stops them.
+  bool clouds = false;
+  int cloud_top = 0;
+  /// The layer's ceiling rises and falls by up to this many rows across the
+  /// world (smoothly, ~64 cells per bump), so clouds get uneven tops.
+  int cloud_wobble = 0;
+  /// Wind, in cells per step (0.35 = 21 cells/s). It wanders between
+  /// -max_wind and +max_wind over about `wind_period` steps, plus `wind_bias`
+  /// (e.g. set by the player). Deterministic: a function of seed and step.
+  float max_wind = 0.0f;
+  int wind_period = 3600;
+  float wind_bias = 0.0f;
+  /// Below this row there is no wind (caves, valleys), building to full
+  /// strength 120 rows above it. 0: the same wind everywhere.
+  int ground_y = 0;
+};
+
 /// Whether a world starts with every chunk in memory, or with none so that a
 /// ChunkStreamer loads them around the player.
 enum class ChunkStorage : std::uint8_t {
@@ -54,6 +76,15 @@ class World {
   const MaterialRegistry& materials() const { return *materials_; }
   MaterialRegistry& materials() { return *materials_; }
   bool wraps_x() const { return wrap_x_; }
+  const Weather& weather() const { return weather_; }
+  void set_weather(const Weather& weather) {
+    weather_ = weather;
+    wind_tick_ = 0xFFFFFFFFU;
+  }
+  /// The wind at row y this step, in cells per step (positive blows right).
+  float wind_at(int y) const;
+  /// The cloud layer's ceiling above column x: cloud_top give or take cloud_wobble.
+  int cloud_ceiling(int x) const;
 
   /// Maps x into [0, width) on a wrapping world; returns it unchanged otherwise.
   int wrap_x(int x) const {
@@ -196,6 +227,9 @@ class World {
   std::vector<int> loaded_;                     // slots of loaded chunks
   std::vector<std::vector<int>> active_rows_;   // per chunk row, during a step
   bool stepping_ = false;
+  Weather weather_;
+  mutable float wind_base_ = 0.0f;               // wind before shelter, for wind_tick_
+  mutable std::uint32_t wind_tick_ = 0xFFFFFFFFU;
 };
 
 }  // namespace px

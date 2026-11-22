@@ -35,6 +35,9 @@ world generation and a world that wraps around:
   holds a derived variant of its element. Each pixel also carries its own
   temperature and health (wear).
 - Simulation is fully separate from rendering and runs headless.
+- Weather: steam rises and cools into cloud, which gathers in a layer above
+  the ground and rains where it is thick; wind pushes clouds, smoke, steam,
+  flames and falling rain.
 - Sandbox tools: paint and erase any material, heat and cool brushes (melt
   rock into lava, harden lava back into rock, boil, freeze, light and put out
   fires), and a pixel inspector that shows every property of the pixel under
@@ -62,7 +65,8 @@ world generation and a world that wraps around:
 | fire | solid | 900 °C heat source with a lifetime; throws flames, leaves smoke; goes out if cooled below 300 °C |
 | flame | gas | short-lived rising tongue of fire |
 | smoke | gas | rises and fades |
-| steam | gas | rises, condenses back to water below 90 °C |
+| steam | gas | rises to the cloud layer, cools into cloud below 90 °C |
+| cloud | gas | water vapour: floats in the cloud layer, drifts with the wind, rains where dense (6 of 8 neighbours cloud), wisps drizzle out slowly |
 | lava | liquid | 1200 °C heat source; with water makes stone + steam; hardens into stone if cooled below 600 °C |
 | ice | solid | starts at −30 °C, melts above 1 °C |
 | dirt | solid | topsoil |
@@ -136,7 +140,8 @@ tower, a water basin and a lava crucible).
 | `Q` / `E` | Previous / next material (all, including dirt, coal, basalt…); choosing a material switches to painting |
 | `H` | Heat brush |
 | `J` | Cool brush |
-| `I` | Pixel inspector on/off (on at start) |
+| `I` | Pixel inspector on/off (on at start); its first line also shows the wind |
+| `[` / `]` | Nudge the wind left / right (it also changes by itself) |
 | `T` | Heat view (temperature map) |
 | `P` | Pause / resume |
 | `.` | Single step while paused |
@@ -223,6 +228,38 @@ Each step (`px::step`, fixed at 60 per second):
 Chunking is purely an optimisation: tests check that the chunked simulation
 produces exactly the same materials and temperatures as updating every cell
 every step, including with fire, lava, steam and ice.
+
+### Weather
+
+Water goes round a cycle, cell for cell, so none is lost: boil a lake and
+the same amount rains back.
+
+- **Steam to cloud.** Steam rises and, below 90 °C, turns into `cloud`
+  (water vapour), a gas that also rises.
+- **The cloud layer.** Materials marked `hovers` (steam, cloud) rise no
+  higher than the world's cloud ceiling (`Weather::cloud_top`, give or take
+  `cloud_wobble` so clouds get uneven tops) and sink back if above it, so
+  vapour collects in a layer that thickens downward. The app puts it 200
+  cells above the mean ground; mountains can reach into it. Underground,
+  cloud collects under the cave ceiling instead.
+- **Rain.** A new data rule, *crowding*: when at least `crowd_count` of a
+  cell's 8 neighbours are the same element, it turns into `crowd_to` with
+  `crowd_chance` per step, or `lone_chance` when not crowded. For cloud: 6
+  neighbours → water at 1% per step, so a layer about three cells thick
+  starts to rain, while thin wisps only drizzle (0.02% per step).
+- **Wind** (`World::wind_at`): wanders between ±`max_wind` over about a minute
+  plus faster gusts, as a function of seed and step (deterministic), plus a
+  `wind_bias` the player can nudge. It is calm below `ground_y` and builds to
+  full strength 120 cells above it. Materials marked `windblown` drift with
+  it: gases (steam, smoke, flame, cloud) and, while falling through the air,
+  water, so rain falls slanted. All windblown cells move on the same steps,
+  and only on steps whose scan starts at the downwind edge, so a cloud
+  travels as one body instead of only its edge peeling off.
+
+Weather is a world setting, not world data: saves do not store it, and the
+app sets it from the generator. Worlds without it (tests, tools) behave as
+before. Chunked simulation stays identical to updating every cell with
+clouds, rain and a wandering wind (tested).
 
 ### The player
 

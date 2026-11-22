@@ -72,7 +72,7 @@ namespace {
 
 /// Materials that need state updates even at ambient temperature with no lifetime running.
 bool active_at_ambient(const MaterialProps& p) {
-  return p.emits_heat || p.has_reactions || p.lifetime_max > 0 || p.emit_chance > 0 ||
+  return p.emits_heat || p.has_reactions || p.lifetime_max > 0 || p.emit_chance > 0 || p.crowd_count > 0 ||
          (p.has_spawn_temp && p.spawn_temp != kAmbient) || (p.has_high && kAmbient >= p.high_temp) ||
          (p.has_low && kAmbient <= p.low_temp);
 }
@@ -112,6 +112,12 @@ MaterialProps MaterialRegistry::resolve(const MaterialDef& d) const {
   p.uses_motion = d.phase == Phase::Powder || d.phase == Phase::Liquid;
   p.durability = d.durability;
   p.passable = d.passable;
+  p.crowd_count = d.crowd_count;
+  p.crowd_to = require(d.crowd_to);
+  p.crowd_chance = to_chance(d.crowd_chance);
+  p.lone_chance = to_chance(d.lone_chance);
+  p.hovers = d.hovers;
+  p.windblown = d.windblown;
   return p;
 }
 
@@ -345,6 +351,7 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.low_temp = -2;
     d.low_to = "ice";
     d.low_chance = 0.05f;
+    d.windblown = true;  // rain drifts while it falls
     ids.water = add(d);
   }
   {
@@ -417,6 +424,7 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.lifetime_max = 16;
     d.decay_to = "smoke";
     d.decay_chance = 0.12f;
+    d.windblown = true;  // flames lean with the wind
     ids.flame = add(d);
   }
   {
@@ -431,6 +439,7 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.conductivity = 0.1f;
     d.lifetime_min = 90;
     d.lifetime_max = 240;
+    d.windblown = true;
     ids.smoke = add(d);
   }
   {
@@ -444,9 +453,11 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.dispersion = 2;
     d.conductivity = 0.35f;
     d.spawn_temperature = 120;
-    d.low_temp = 90;  // condenses back into water
-    d.low_to = "water";
+    d.low_temp = 90;  // cools into cloud (water vapour), which rains when dense
+    d.low_to = "cloud";
     d.low_chance = 0.01f;
+    d.windblown = true;
+    d.hovers = true;  // stops at the cloud layer too, so it condenses there
     ids.steam = add(d);
   }
   {
@@ -575,6 +586,32 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     ids.tar = add(d);
   }
 
+  {
+    // Water vapour: what cooled steam becomes. Rises to the cloud layer and
+    // floats there, drifting with the wind; where it is dense (6 of its 8
+    // neighbours cloud) it condenses into raindrops, and thin wisps drizzle
+    // out slowly. Cell for cell, so water is
+    // conserved: boil a lake and the same amount rains back. Heated, it is
+    // steam again.
+    MaterialDef d;
+    d.name = "cloud";
+    d.phase = Phase::Gas;
+    d.density = 0.7f;  // steam (0.6) rises through it, air (1.2) does not
+    d.color = {214, 218, 228};
+    d.color_variation = 8;
+    d.rise_chance = 0.6f;
+    d.conductivity = 0.1f;
+    d.high_temp = 100;
+    d.high_to = "steam";
+    d.high_chance = 0.05f;
+    d.crowd_count = 6;
+    d.crowd_to = "water";
+    d.crowd_chance = 0.01f;
+    d.lone_chance = 0.0002f;  // wisps drizzle out over a minute or two
+    d.hovers = true;
+    d.windblown = true;
+    ids.cloud = add(d);
+  }
   {
     // Wood that grew as a tree: burns like wood, but the player walks past it
     // (trees are scenery). Painted wood stays solid for building.

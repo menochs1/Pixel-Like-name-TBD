@@ -1,6 +1,7 @@
 #include "core/simulator.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -226,6 +227,23 @@ int fall(StepContext& ctx, int x, int y, MaterialId m, int velocity) {
   return y + dist;
 }
 
+/// Whether wind moves windblown cells at row y this step: +1 or -1 (the
+/// direction), or 0. A cell blown at w cells/step moves one cell on a fraction
+/// of steps, the same steps for every cell, and only on steps whose scan runs
+/// from the downwind edge (odd ticks scan left to right): each cell then moves
+/// into the space its downwind neighbour just left, so a cloud travels as one
+/// instead of only its edge peeling off.
+int wind_step(const StepContext& ctx, int y) {
+  const float w = ctx.world.wind_at(y);
+  if (w == 0.0f) return 0;
+  const int dir = w > 0.0f ? 1 : -1;
+  const bool left_to_right = (ctx.tick & 1U) != 0;
+  if (left_to_right == (dir > 0)) return 0;
+  const double rate = std::min(1.0, 2.0 * std::fabs(static_cast<double>(w)));
+  const double k = static_cast<double>(ctx.tick >> 1);
+  return std::floor(k * rate) != std::floor((k - 1.0) * rate) ? dir : 0;
+}
+
 /// Tries down-left / down-right, `first` direction first. Returns the direction
 /// taken, or 0 if neither was free.
 int slide_diagonal(StepContext& ctx, int x, int y, MaterialId m, int first) {
@@ -262,7 +280,16 @@ bool update_liquid(StepContext& ctx, int x, int y, MaterialId m, int velocity, R
   const int prev = ctx.world.chunk_for(x, y).flow(World::local_index(x, y));
   const int first = prev != 0 ? prev : rng.direction();
 
-  if (fall(ctx, x, y, m, velocity) != y) return true;  // the flow direction travelled with the cell
+  if (const int ny = fall(ctx, x, y, m, velocity); ny != y) {  // the flow direction travelled with the cell
+    // Falling through the air (rain), it drifts with the wind.
+    if (ctx.materials.props(m).windblown) {
+      const int d = wind_step(ctx, ny);
+      if (d != 0 && ctx.world.get(x + d, ny) == kEmpty && is_open(ctx.materials, ctx.world.get(x + d, ny + 1))) {
+        swap_cells(ctx, x, ny, x + d, ny);
+      }
+    }
+    return true;
+  }
   if (const int d = slide_diagonal(ctx, x, y, m, first); d != 0) {
     set_flow(ctx.world, x + d, y + 1, d);
     set_velocity(ctx.world, x + d, y + 1, 0);  // it went down: no longer settling
@@ -309,7 +336,22 @@ bool update_liquid(StepContext& ctx, int x, int y, MaterialId m, int velocity, R
 /// density against other gases, and drift sideways.
 bool update_gas(StepContext& ctx, int x, int y, MaterialId m, const MaterialProps& p, Rng& rng) {
   const MaterialRegistry& mats = ctx.materials;
-  if (rng.chance(p.rise_chance)) {
+  if (p.windblown) {
+    const int d = wind_step(ctx, y);
+    if (d != 0 && ctx.world.get(x + d, y) == kEmpty) {
+      swap_cells(ctx, x, y, x + d, y);
+      return true;
+    }
+  }
+  // Cloud rises to the cloud layer and no higher; above it, it sinks back.
+  const Weather& sky = ctx.world.weather();
+  const int ceiling = p.hovers && sky.clouds ? ctx.world.cloud_ceiling(x) : 0;
+  const bool capped = p.hovers && sky.clouds && y <= ceiling;
+  if (p.hovers && sky.clouds && y < ceiling && ctx.world.get(x, y + 1) == kEmpty) {
+    swap_cells(ctx, x, y, x, y + 1);
+    return true;
+  }
+  if (!capped && rng.chance(p.rise_chance)) {
     const MaterialId up = ctx.world.get(x, y - 1);
     if (up == kEmpty) {
       swap_cells(ctx, x, y, x, y - 1);
@@ -449,6 +491,22 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
       return StateResult::Transformed;
     }
     keep_awake = true;
+  }
+
+  // Crowding (dense cloud condenses into rain).
+  if (p.crowd_count > 0) {
+    keep_awake = true;
+    int same = 0;
+    for (int dy = -1; dy <= 1; ++dy)
+      for (int dx = -1; dx <= 1; ++dx) {
+        if (dx == 0 && dy == 0) continue;
+        const MaterialId n = ctx.world.get(x + dx, y + dy);
+        same += n != kOutOfBounds && ctx.materials.props(n).base == p.base ? 1 : 0;
+      }
+    if (rng.chance(same >= p.crowd_count ? p.crowd_chance : p.lone_chance)) {
+      transform(ctx, x, y, p.crowd_to, 0, rng);
+      return StateResult::Transformed;
+    }
   }
 
   // Limited lifetime.

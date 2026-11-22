@@ -1,6 +1,7 @@
 #include "core/world.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 #include "core/rng.hpp"
@@ -49,6 +50,50 @@ std::unique_ptr<Chunk> World::unload_chunk(int cx, int cy) {
     }
   }
   return std::move(s);
+}
+
+float World::wind_at(int y) const {
+  const Weather& w = weather_;
+  if (w.max_wind == 0.0f && w.wind_bias == 0.0f) return 0.0f;
+  float shelter = 1.0f;
+  if (w.ground_y > 0) {
+    const int above = w.ground_y - y;
+    if (above <= 0) return 0.0f;
+    shelter = std::min(1.0f, static_cast<float>(above) / 120.0f);
+  }
+  if (wind_tick_ == tick_) return wind_base_ * shelter;  // computed once per step
+  // Smooth noise over time: a slow swing plus faster, weaker gusts.
+  auto noise = [&](float t, std::uint32_t salt) {
+    const float f0 = std::floor(t);
+    const int i = static_cast<int>(f0);
+    const float f = t - f0, s = f * f * (3.0f - 2.0f * f);
+    const auto at = [&](int k) {
+      return static_cast<float>(cell_hash(seed_ ^ salt, k, 0, 0) & 0xFFFF) / 32767.5f - 1.0f;
+    };
+    return at(i) + (at(i + 1) - at(i)) * s;
+  };
+  const float t = static_cast<float>(tick_) / static_cast<float>(std::max(1, w.wind_period));
+  const float n = std::clamp(0.8f * noise(t, 0x57494E44U) + 0.2f * noise(t * 6.0f, 0x47555354U), -1.0f, 1.0f);
+  wind_base_ = w.max_wind * n + w.wind_bias;
+  wind_tick_ = tick_;
+  return wind_base_ * shelter;
+}
+
+int World::cloud_ceiling(int x) const {
+  const Weather& w = weather_;
+  if (w.cloud_wobble <= 0) return w.cloud_top;
+  // Smooth noise over x on a 32-cell lattice that repeats around the world
+  // (widths are whole chunks, so whole lattice cells), so the seam is invisible.
+  const int cells = std::max(1, width_ / 32);
+  const int xx = wrap_x_ ? wrap_x(x) : x;
+  const int i = xx >> 5;
+  const float f = static_cast<float>(xx & 31) / 32.0f, s = f * f * (3.0f - 2.0f * f);
+  auto at = [&](int k) {
+    k = ((k % cells) + cells) % cells;
+    return static_cast<float>(cell_hash(seed_ ^ 0x434C4F55U, k, 0, 0) & 0xFFFF) / 32767.5f - 1.0f;
+  };
+  const float n = at(i) + (at(i + 1) - at(i)) * s;
+  return w.cloud_top + static_cast<int>(std::lround(n * static_cast<float>(w.cloud_wobble)));
 }
 
 void World::begin_step() {

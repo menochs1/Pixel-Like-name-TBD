@@ -19,6 +19,11 @@
 //   H              heat brush: melts rock, boils water, lights fuel
 //   J              cool brush: freezes water, hardens lava, puts out fire
 //   I              toggle the pixel inspector (what is under the cursor)
+//   [ / ]          nudge the wind left / right (it also changes by itself)
+//
+// Weather: steam (9) rises and cools into cloud, which gathers in a layer
+// above the ground and rains where it is thick. Wind pushes clouds, smoke,
+// steam, flames and falling rain.
 //   T              toggle heat view (temperature map)
 //   P              pause / resume
 //   . (period)     single step while paused
@@ -98,6 +103,23 @@ constexpr int kPrefetchMargin = 2;
 constexpr int kKeepMargin = 3;
 constexpr int kPrefetchPerFrame = 6;
 const char* const kQuickSave = "saves/quicksave";
+// Weather: the cloud layer sits this far above the mean ground level, and the
+// wind wanders up to this fast (cells/step; 0.3 = 18 cells/s) over about a minute.
+constexpr int kCloudHeight = 200;
+constexpr float kMaxWind = 0.3f;
+constexpr int kWindPeriod = 3600;
+
+/// Clouds a fixed height above the mean ground, wind calm below ground level.
+px::Weather weather_for(int ground_y) {
+  px::Weather sky;
+  sky.clouds = true;
+  sky.cloud_top = std::max(0, ground_y - kCloudHeight);
+  sky.cloud_wobble = 16;
+  sky.max_wind = kMaxWind;
+  sky.wind_period = kWindPeriod;
+  sky.ground_y = ground_y;
+  return sky;
+}
 
 /// One world being played, and what keeps it streamed. Members are destroyed in
 /// reverse order: the streamer before what it refers to.
@@ -197,6 +219,9 @@ int main(int argc, char** argv) {
       session->world = std::make_unique<px::World>(kDemoChunksX, kDemoChunksY, materials, s);
       px::build_demo_scene(*session->world, ids);
       session->spawn_x = 12.0f;  // on the ground left of the water basin
+      px::Weather sky = weather_for(session->world->height() - 40);
+      sky.cloud_top = 40;  // a small world: clouds near the top
+      session->world->set_weather(sky);
       return session;
     }
     session->world = std::make_unique<px::World>(kWorldChunksX, kWorldChunksY, materials, s, px::EdgeX::Wrap,
@@ -205,6 +230,8 @@ int main(int argc, char** argv) {
     session->gen_params->scale = kWorldScale;
     session->generator.emplace(ids, s, session->world->width(), session->world->height(), *session->gen_params);
     attach_streaming(*session);
+    session->world->set_weather(
+        weather_for(static_cast<int>(session->gen_params->surface * static_cast<float>(session->world->height()))));
     session->home_x = session->world->width() / 2.0 - w / 2.0;
     session->home_y =
         std::clamp(session->generator->surface_y(session->world->width() / 2) - h / 3, 0, session->world->height() - h);
@@ -226,6 +253,8 @@ int main(int argc, char** argv) {
     }
     attach_streaming(*session);
     session->store->set_base(save->chunk_dir, save->remap);
+    const float surface = session->gen_params ? session->gen_params->surface : 0.8f;  // no generator: low ground
+    session->world->set_weather(weather_for(static_cast<int>(surface * static_cast<float>(session->world->height()))));
     session->home_x = save->info.view_x;
     session->home_y = save->info.view_y;
     session->spawn_x = static_cast<float>(save->info.view_x + w / 2 - 8);
@@ -457,6 +486,16 @@ int main(int argc, char** argv) {
               world.clear();
               break;
             case SDLK_f: show_dirty = !show_dirty; break;
+            case SDLK_LEFTBRACKET:
+            case SDLK_RIGHTBRACKET: {
+              px::Weather sky = world.weather();
+              sky.wind_bias += e.key.keysym.sym == SDLK_RIGHTBRACKET ? 0.05f : -0.05f;
+              world.set_weather(sky);
+              char msg[64];
+              std::snprintf(msg, sizeof(msg), "wind nudged %+.0f cells/s", static_cast<double>(sky.wind_bias) * 60.0);
+              show(msg);
+              break;
+            }
             case SDLK_HOME:
               cam_x = session->home_x;
               cam_y = session->home_y;
@@ -626,7 +665,15 @@ int main(int argc, char** argv) {
     draw_brush_outline(pixels.data(), w, h, mx, my, brush.radius, outline);
     if (show_inspector) {
       std::vector<std::string> lines = px::describe(world, px::inspect(world, mx + cam_ix(), my + cam_iy()));
-      lines.insert(lines.begin(), tool_name() + "  r" + std::to_string(brush.radius) + (paused ? "  paused" : ""));
+      // Wind where the camera is: arrows show direction, number is cells/s.
+      const float wind = world.wind_at(cam_iy() + h / 2) * 60.0f;
+      const int arrows = std::min(3, static_cast<int>(std::fabs(wind) / 8.0f) + (std::fabs(wind) >= 1.0f ? 1 : 0));
+      std::string wind_text = "wind ";
+      if (arrows == 0) wind_text += "calm";
+      else wind_text += std::string(static_cast<std::size_t>(arrows), wind > 0 ? '>' : '<') + " " +
+                        std::to_string(static_cast<int>(std::lround(std::fabs(wind))));
+      lines.insert(lines.begin(), tool_name() + "  r" + std::to_string(brush.radius) + "  " + wind_text +
+                                      (paused ? "  paused" : ""));
       int pw = 0;
       for (const std::string& line : lines) pw = std::max(pw, px::text_width(line) + 6);
       // Top-left, unless the cursor is there: then top-right.

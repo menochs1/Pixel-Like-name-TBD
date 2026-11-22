@@ -84,6 +84,18 @@ struct MaterialDef {
   std::string emits;
   float emit_chance = 0.0f;
 
+  // Crowding: when at least `crowd_count` of its 8 neighbours are the same
+  // element, turn into `crowd_to` with `crowd_chance` per step (dense cloud
+  // condenses into rain). 0 = no crowding rule.
+  std::uint8_t crowd_count = 0;
+  std::string crowd_to;
+  float crowd_chance = 0.0f;
+  float lone_chance = 0.0f;  // the same change when not crowded (thin cloud drizzles out)
+
+  // Weather.
+  bool hovers = false;     // gases: rise no higher than the cloud layer (World::Weather), sink back if above
+  bool windblown = false;  // gases drift with the wind; liquids drift while falling through the air (rain)
+
   std::uint16_t durability = 0;  // damage a cell takes before it breaks (World::damage); 0 = breaks at once
 
   /// Used by the engine itself (the player's body) and not offered as a
@@ -132,6 +144,12 @@ struct MaterialProps {
   MaterialId base = kEmpty;
   std::uint16_t durability = 0;
   bool passable = false;  // the player walks through it
+  std::uint8_t crowd_count = 0;
+  MaterialId crowd_to = kEmpty;
+  std::uint16_t crowd_chance = 0;
+  std::uint16_t lone_chance = 0;
+  bool hovers = false;
+  bool windblown = false;
 };
 
 /// How a reaction computes a product's properties from its two parents, the
@@ -289,6 +307,7 @@ struct BaseMaterials {
   MaterialId tar = kEmpty;
   MaterialId body = kEmpty;
   MaterialId trunk = kEmpty;
+  MaterialId cloud = kEmpty;
 };
 
 /// Registers the built-in materials and reactions, finalizes the registry and
