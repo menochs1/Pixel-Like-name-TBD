@@ -415,8 +415,6 @@ TEST(heat_conducts_along_stone) {
   for (int x = 3; x < 40; ++x) CHECK(w.temperature(x, 32) >= w.temperature(x + 1, 32));
 }
 
-// Steam cools into cloud, which gathers under the lid and rains where it is
-// dense. A thin remnant too sparse to rain stays as cloud (humidity).
 TEST(steam_in_a_closed_box_condenses_back_to_water) {
   Fixture f;
   px::World w(1, 1, f.materials, 13);
@@ -425,8 +423,7 @@ TEST(steam_in_a_closed_box_condenses_back_to_water) {
   const int steam_before = count_in(w, f.ids.steam);
   run(w, 6000);
   CHECK_EQ(count_in(w, f.ids.steam), 0);
-  CHECK_EQ(count_in(w, f.ids.water) + count_in(w, f.ids.cloud), steam_before);  // none lost
-  CHECK(count_in(w, f.ids.water) > steam_before * 2 / 3);                      // most of it rained
+  CHECK_EQ(count_in(w, f.ids.water), steam_before);  // every cell condensed, none lost
 }
 
 TEST(water_boils_over_a_heat_source) {

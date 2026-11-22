@@ -45,7 +45,7 @@ bool ChunkStreamer::load(int cx, int cy) {
   if (generator_) {
     generator_->generate_chunk(world_, cx, cy);
   } else {
-    world_.load_chunk(cx, cy, std::make_unique<Chunk>());
+    world_.load_chunk(cx, cy, world_.make_empty_chunk(cy));  // empty, air at rest
   }
   return ok;
 }

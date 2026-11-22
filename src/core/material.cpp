@@ -116,8 +116,8 @@ MaterialProps MaterialRegistry::resolve(const MaterialDef& d) const {
   p.crowd_to = require(d.crowd_to);
   p.crowd_chance = to_chance(d.crowd_chance);
   p.lone_chance = to_chance(d.lone_chance);
-  p.hovers = d.hovers;
   p.windblown = d.windblown;
+  p.joins_weather = d.joins_weather;
   return p;
 }
 
@@ -453,11 +453,11 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.dispersion = 2;
     d.conductivity = 0.35f;
     d.spawn_temperature = 120;
-    d.low_temp = 90;  // cools into cloud (water vapour), which rains when dense
-    d.low_to = "cloud";
-    d.low_chance = 0.01f;
+    d.low_temp = 90;  // condenses back into water, slowly enough that some rises high
+    d.low_to = "water";
+    d.low_chance = 0.003f;
     d.windblown = true;
-    d.hovers = true;  // stops at the cloud layer too, so it condenses there
+    d.joins_weather = true;  // steam that rises high enough feeds the rain (core/weather.hpp)
     ids.steam = add(d);
   }
   {
@@ -587,30 +587,21 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
   }
 
   {
-    // Water vapour: what cooled steam becomes. Rises to the cloud layer and
-    // floats there, drifting with the wind; where it is dense (6 of its 8
-    // neighbours cloud) it condenses into raindrops, and thin wisps drizzle
-    // out slowly. Cell for cell, so water is
-    // conserved: boil a lake and the same amount rains back. Heated, it is
-    // steam again.
+    // Falls instead of rain where the air is below freezing (high up), piles
+    // up like a light powder and melts back into water above 1 C.
     MaterialDef d;
-    d.name = "cloud";
-    d.phase = Phase::Gas;
-    d.density = 0.7f;  // steam (0.6) rises through it, air (1.2) does not
-    d.color = {214, 218, 228};
+    d.name = "snow";
+    d.phase = Phase::Powder;
+    d.density = 250;
+    d.color = {232, 238, 248};
     d.color_variation = 8;
-    d.rise_chance = 0.6f;
-    d.conductivity = 0.1f;
-    d.high_temp = 100;
-    d.high_to = "steam";
-    d.high_chance = 0.05f;
-    d.crowd_count = 6;
-    d.crowd_to = "water";
-    d.crowd_chance = 0.01f;
-    d.lone_chance = 0.0002f;  // wisps drizzle out over a minute or two
-    d.hovers = true;
-    d.windblown = true;
-    ids.cloud = add(d);
+    d.conductivity = 0.2f;
+    d.high_temp = 1;
+    d.high_to = "water";
+    d.high_chance = 0.01f;
+    d.windblown = true;  // drifts while it falls
+    d.durability = 2;
+    ids.snow = add(d);
   }
   {
     // Wood that grew as a tree: burns like wood, but the player walks past it

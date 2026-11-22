@@ -16,26 +16,36 @@ enum class EdgeX : std::uint8_t {
   Wrap,  // x wraps around: walking off the right edge comes back in on the left
 };
 
-/// The sky: where clouds float and how the wind blows. Part of the world's
-/// rules (the simulation reads it), not of its data: saves do not store it.
+/// The climate: temperature with altitude, the wind, and the regional weather
+/// (core/weather.hpp). The settings are part of the world's rules, not of its
+/// data: saves do not store them. All off by default.
 struct Weather {
-  /// Materials that hover (cloud) rise no higher than this row and sink back
-  /// if above it, so cloud collects in a layer just below it. Off: they rise
-  /// until something stops them.
-  bool clouds = false;
-  int cloud_top = 0;
-  /// The layer's ceiling rises and falls by up to this many rows across the
-  /// world (smoothly, ~64 cells per bump), so clouds get uneven tops.
-  int cloud_wobble = 0;
+  /// Mean ground level. Above it the air gets colder (lapse_rate) and the wind
+  /// builds to full strength 120 rows up; at and below it, it is 20 C and calm.
+  /// 0: no ground level (the same temperature and wind everywhere).
+  int ground_y = 0;
+  /// Degrees colder per row above ground_y: the temperature everything rests
+  /// at up there (ambient_at). 0.03 freezes ~730 rows up.
+  float lapse_rate = 0.0f;
+  /// Vapour (steam) rising above this row leaves the world and becomes moisture
+  /// in the weather overhead, out of sight. 0: never.
+  int vapour_y = 0;
+  /// Weather areas: the world is cut into columns this wide, each with its own
+  /// moisture, which builds up by itself (humidity_rate per step, in cells of
+  /// water), drifts with the wind, and is fed by vapour. At rain_start an area
+  /// starts raining, about rain_per_step drops per step, until it is down to
+  /// rain_stop. 0 areas: no rain.
+  int region_width = 0;
+  float humidity_rate = 0.0f;
+  float rain_start = 2000.0f;
+  float rain_stop = 300.0f;
+  float rain_per_step = 3.0f;
   /// Wind, in cells per step (0.35 = 21 cells/s). It wanders between
   /// -max_wind and +max_wind over about `wind_period` steps, plus `wind_bias`
   /// (e.g. set by the player). Deterministic: a function of seed and step.
   float max_wind = 0.0f;
   int wind_period = 3600;
   float wind_bias = 0.0f;
-  /// Below this row there is no wind (caves, valleys), building to full
-  /// strength 120 rows above it. 0: the same wind everywhere.
-  int ground_y = 0;
 };
 
 /// Whether a world starts with every chunk in memory, or with none so that a
@@ -77,14 +87,33 @@ class World {
   MaterialRegistry& materials() { return *materials_; }
   bool wraps_x() const { return wrap_x_; }
   const Weather& weather() const { return weather_; }
-  void set_weather(const Weather& weather) {
+  /// Sets the climate and resets the weather areas (moisture starts at a
+  /// different, seeded point of the cycle in each area).
+  void set_weather(const Weather& weather);
+  /// Changes the settings but keeps each area's moisture and rain.
+  void tune_weather(const Weather& weather) {
     weather_ = weather;
     wind_tick_ = 0xFFFFFFFFU;
   }
+  /// The temperature cells rest at in row y: 20 C at and below ground level,
+  /// colder above it.
+  int ambient_at(int y) const {
+    if (weather_.lapse_rate <= 0.0f || y >= weather_.ground_y) return kAmbient;
+    return std::max(-273, kAmbient - static_cast<int>(static_cast<float>(weather_.ground_y - y) * weather_.lapse_rate));
+  }
+  // Weather areas (see core/weather.hpp).
+  int weather_areas() const { return static_cast<int>(moisture_.size()); }
+  int weather_area(int x) const;  // the area over column x (0 if there are none)
+  float& moisture(int area) { return moisture_[static_cast<std::size_t>(area)]; }
+  float moisture(int area) const { return moisture_[static_cast<std::size_t>(area)]; }
+  bool raining(int area) const { return raining_[static_cast<std::size_t>(area)] != 0; }
+  void set_raining(int area, bool on) { raining_[static_cast<std::size_t>(area)] = on ? 1 : 0; }
+  /// Vapour that left the world over column x.
+  void add_moisture(int x, float amount) {
+    if (!moisture_.empty()) moisture_[static_cast<std::size_t>(weather_area(x))] += amount;
+  }
   /// The wind at row y this step, in cells per step (positive blows right).
   float wind_at(int y) const;
-  /// The cloud layer's ceiling above column x: cloud_top give or take cloud_wobble.
-  int cloud_ceiling(int x) const;
 
   /// Maps x into [0, width) on a wrapping world; returns it unchanged otherwise.
   int wrap_x(int x) const {
@@ -131,6 +160,13 @@ class World {
   void fill_circle(int cx, int cy, int radius, MaterialId material, float coverage = 1.0f);
   /// Empties every loaded chunk (marking them touched, so the emptiness is saved).
   void clear();
+  /// An empty chunk for chunk row cy, its air at the temperature of its
+  /// altitude (ambient_at), so it is at rest from the start.
+  std::unique_ptr<Chunk> make_empty_chunk(int cy) const;
+  /// Puts every loaded cell that has no temperature of its own (no spawn
+  /// temperature) at its altitude's temperature. For worlds built by hand
+  /// after set_weather() (generated worlds already start that way).
+  void settle_temperatures();
 
   /// Marks (x, y) and its 8 neighbours for update on the next step.
   void wake(int x, int y);
@@ -228,6 +264,8 @@ class World {
   std::vector<std::vector<int>> active_rows_;   // per chunk row, during a step
   bool stepping_ = false;
   Weather weather_;
+  std::vector<float> moisture_;         // per weather area
+  std::vector<std::uint8_t> raining_;
   mutable float wind_base_ = 0.0f;               // wind before shelter, for wind_tick_
   mutable std::uint32_t wind_tick_ = 0xFFFFFFFFU;
 };

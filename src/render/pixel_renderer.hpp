@@ -27,7 +27,9 @@ class PixelRenderer {
   /// `pixels` must hold at least pitch * view height entries.
   /// Flickering materials (fire, lava) are animated from the world tick here;
   /// flicker is a visual effect, not simulation state.
-  void render(const World& world, std::uint32_t* pixels, int pitch, Viewport view = {}) const;
+  /// With `draw_air` false, empty cells are left untouched, so a background
+  /// drawn first (ParallaxBackground) shows through.
+  void render(const World& world, std::uint32_t* pixels, int pitch, Viewport view = {}, bool draw_air = true) const;
 
   /// Heat map: blue below 0 °C, dark at ambient, through red and yellow to white
   /// at 1200 °C+. Materials are faintly outlined so the scene stays readable.

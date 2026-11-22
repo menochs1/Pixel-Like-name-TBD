@@ -35,9 +35,12 @@ world generation and a world that wraps around:
   holds a derived variant of its element. Each pixel also carries its own
   temperature and health (wear).
 - Simulation is fully separate from rendering and runs headless.
-- Weather: steam rises and cools into cloud, which gathers in a layer above
-  the ground and rains where it is thick; wind pushes clouds, smoke, steam,
-  flames and falling rain.
+- Climate and weather: it gets colder the higher you go; the world is cut
+  into weather areas whose moisture builds up, drifts with the wind and is
+  fed by steam rising out of sight, and rains (or snows) into view from above
+  when wet enough. Wind pushes smoke, steam, flames, rain and snow.
+- A parallax background: sky, far mountains and hills behind the world, a
+  rock wall behind caves.
 - Sandbox tools: paint and erase any material, heat and cool brushes (melt
   rock into lava, harden lava back into rock, boil, freeze, light and put out
   fires), and a pixel inspector that shows every property of the pixel under
@@ -65,8 +68,8 @@ world generation and a world that wraps around:
 | fire | solid | 900 °C heat source with a lifetime; throws flames, leaves smoke; goes out if cooled below 300 °C |
 | flame | gas | short-lived rising tongue of fire |
 | smoke | gas | rises and fades |
-| steam | gas | rises to the cloud layer, cools into cloud below 90 °C |
-| cloud | gas | water vapour: floats in the cloud layer, drifts with the wind, rains where dense (6 of 8 neighbours cloud), wisps drizzle out slowly |
+| steam | gas | rises, condenses back to water below 90 °C; rising out of sight, it feeds the rain |
+| snow | powder | falls instead of rain where the air is freezing; melts above 1 °C |
 | lava | liquid | 1200 °C heat source; with water makes stone + steam; hardens into stone if cooled below 600 °C |
 | ice | solid | starts at −30 °C, melts above 1 °C |
 | dirt | solid | topsoil |
@@ -142,6 +145,7 @@ tower, a water basin and a lava crucible).
 | `J` | Cool brush |
 | `I` | Pixel inspector on/off (on at start); its first line also shows the wind |
 | `[` / `]` | Nudge the wind left / right (it also changes by itself) |
+| `K` | Make it rain here (fills this area's weather with moisture) |
 | `T` | Heat view (temperature map) |
 | `P` | Pause / resume |
 | `.` | Single step while paused |
@@ -179,7 +183,7 @@ src/world/    seeded world generation, demo scenes
 src/entities/ the player character (movement and collision; no rendering)
 src/sandbox/  sandbox tools: heat/cool brushes, pixel inspector (no rendering)
 src/save/     chunk encoding, saves, chunk store and streaming
-src/render/   World -> ARGB pixel buffer, built-in 3x5 font (no SDL)
+src/render/   World -> ARGB pixel buffer, parallax background, built-in 3x5 font (no SDL)
 src/app/      SDL2 window, input, fixed 60 Hz timestep
 tools/        headless benchmark / snapshot tool, stress test
 tests/        unit tests (tiny built-in harness, run via CTest)
@@ -229,37 +233,56 @@ Chunking is purely an optimisation: tests check that the chunked simulation
 produces exactly the same materials and temperatures as updating every cell
 every step, including with fire, lava, steam and ice.
 
-### Weather
+### Climate and weather
 
-Water goes round a cycle, cell for cell, so none is lost: boil a lake and
-the same amount rains back.
+Settings in `World::Weather` (`src/core/world.hpp`), the regional weather in
+`src/core/weather.hpp`. All off by default; the app turns them on.
 
-- **Steam to cloud.** Steam rises and, below 90 °C, turns into `cloud`
-  (water vapour), a gas that also rises.
-- **The cloud layer.** Materials marked `hovers` (steam, cloud) rise no
-  higher than the world's cloud ceiling (`Weather::cloud_top`, give or take
-  `cloud_wobble` so clouds get uneven tops) and sink back if above it, so
-  vapour collects in a layer that thickens downward. The app puts it 200
-  cells above the mean ground; mountains can reach into it. Underground,
-  cloud collects under the cave ceiling instead.
-- **Rain.** A new data rule, *crowding*: when at least `crowd_count` of a
-  cell's 8 neighbours are the same element, it turns into `crowd_to` with
-  `crowd_chance` per step, or `lone_chance` when not crowded. For cloud: 6
-  neighbours → water at 1% per step, so a layer about three cells thick
-  starts to rain, while thin wisps only drizzle (0.02% per step).
+- **Colder higher up.** Above the mean ground level (`ground_y`) the
+  temperature everything rests at (`World::ambient_at`) drops by `lapse_rate`
+  per row: in the app 0.03 °C, so it freezes about 730 cells up. Air relaxes
+  toward that temperature, generated terrain and sky start at it (so a cold
+  sky is at rest and costs nothing), and a cell resting past one of its own
+  transition points still changes: water left on a cold peak freezes, snow
+  carried into warmer air melts.
+- **Weather areas.** The world is cut into columns `region_width` wide
+  (1024 in the app), each with its own moisture. It builds up by itself
+  (`humidity_rate`), drifts with the wind high up, and is fed by world
+  events: steam that rises above `vapour_y` (300 cells above the ground in the
+  app, out of sight) leaves the world and becomes moisture over where it rose.
+  Boil a lake and rain comes to that area.
+- **Rain.** An area starts raining at `rain_start` and stops at `rain_stop`,
+  losing about `rain_per_step` cells of water a step (more when very wet).
+  Drops are placed along the top row of the simulated box, which reaches above
+  the view, so rain falls into view from above; where the air there is below
+  freezing, snow falls instead. Rain over areas nobody is looking at still
+  uses moisture up. No rain falls into caves. Falling rain is drawn as short
+  streaks so single drops read against the sky.
 - **Wind** (`World::wind_at`): wanders between ±`max_wind` over about a minute
-  plus faster gusts, as a function of seed and step (deterministic), plus a
-  `wind_bias` the player can nudge. It is calm below `ground_y` and builds to
-  full strength 120 cells above it. Materials marked `windblown` drift with
-  it: gases (steam, smoke, flame, cloud) and, while falling through the air,
-  water, so rain falls slanted. All windblown cells move on the same steps,
-  and only on steps whose scan starts at the downwind edge, so a cloud
-  travels as one body instead of only its edge peeling off.
+  plus gusts, as a function of seed and step (deterministic), plus a
+  `wind_bias` the player can nudge. It is calm below the ground level and
+  builds to full strength 120 cells above it. `windblown` materials drift with
+  it: gases (steam, smoke, flame) and, while falling, water and snow. Drifting
+  cells move on the same steps, from the downwind edge, so a body of smoke or
+  a sheet of rain moves as one.
+- **Crowding** is a general data rule (`crowd_count`, `crowd_to`,
+  `crowd_chance`, `lone_chance`): a cell with enough neighbours of its own kind
+  turns into something else, e.g. a dense gas condensing.
 
-Weather is a world setting, not world data: saves do not store it, and the
-app sets it from the generator. Worlds without it (tests, tools) behave as
-before. Chunked simulation stays identical to updating every cell with
-clouds, rain and a wandering wind (tested).
+Water is conserved through the cycle except for the abstract parts: moisture
+building up by itself, and rain that falls where nobody is looking. The
+weather settings and the areas' moisture are not saved; a loaded world starts
+its weather afresh. Chunked simulation stays identical to updating every cell
+with cold air, vapour leaving, rain, snow and wind (tested).
+
+### Background
+
+`src/render/background.hpp`: a sky gradient and three silhouette layers
+(far mountains, hills, a near wooded ridge) drawn behind the world wherever it
+is empty, moving at 12%, 30% and 50% of the camera's speed, and paler with
+distance. Below the terrain surface (from the generator), empty cells show a
+rock wall instead, so caves have a backdrop. Silhouettes and the rock texture
+are computed once and looked up per pixel; purely visual.
 
 ### The player
 

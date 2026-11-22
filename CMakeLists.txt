@@ -36,6 +36,7 @@ add_library(px_core
   src/core/material.cpp
   src/core/world.cpp
   src/core/simulator.cpp
+  src/core/weather.cpp
   src/world/demo_scene.cpp
   src/world/world_gen.cpp
   src/sandbox/tools.cpp
@@ -51,7 +52,7 @@ target_link_libraries(px_core PUBLIC Threads::Threads)
 target_compile_options(px_core PRIVATE ${PX_WARNINGS})
 
 # --- Rendering: turns a World into an ARGB pixel buffer. Still no SDL.
-add_library(px_render src/render/pixel_renderer.cpp src/render/text.cpp src/render/sprites.cpp)
+add_library(px_render src/render/pixel_renderer.cpp src/render/text.cpp src/render/sprites.cpp src/render/background.cpp)
 target_link_libraries(px_render PUBLIC px_core)
 target_compile_options(px_render PRIVATE ${PX_WARNINGS})
 

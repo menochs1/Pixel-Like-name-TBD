@@ -79,21 +79,24 @@ float World::wind_at(int y) const {
   return wind_base_ * shelter;
 }
 
-int World::cloud_ceiling(int x) const {
-  const Weather& w = weather_;
-  if (w.cloud_wobble <= 0) return w.cloud_top;
-  // Smooth noise over x on a 32-cell lattice that repeats around the world
-  // (widths are whole chunks, so whole lattice cells), so the seam is invisible.
-  const int cells = std::max(1, width_ / 32);
-  const int xx = wrap_x_ ? wrap_x(x) : x;
-  const int i = xx >> 5;
-  const float f = static_cast<float>(xx & 31) / 32.0f, s = f * f * (3.0f - 2.0f * f);
-  auto at = [&](int k) {
-    k = ((k % cells) + cells) % cells;
-    return static_cast<float>(cell_hash(seed_ ^ 0x434C4F55U, k, 0, 0) & 0xFFFF) / 32767.5f - 1.0f;
-  };
-  const float n = at(i) + (at(i + 1) - at(i)) * s;
-  return w.cloud_top + static_cast<int>(std::lround(n * static_cast<float>(w.cloud_wobble)));
+void World::set_weather(const Weather& weather) {
+  weather_ = weather;
+  wind_tick_ = 0xFFFFFFFFU;
+  moisture_.clear();
+  raining_.clear();
+  if (weather.region_width <= 0) return;
+  const int areas = std::max(1, (width_ + weather.region_width - 1) / weather.region_width);
+  moisture_.resize(static_cast<std::size_t>(areas));
+  raining_.assign(static_cast<std::size_t>(areas), 0);
+  for (int a = 0; a < areas; ++a) {  // each area somewhere along its way to the next rain
+    moisture_[static_cast<std::size_t>(a)] =
+        weather.rain_start * static_cast<float>(cell_hash(seed_ ^ 0x4D4F4953U, a, 0, 0) & 0xFFFF) / 65536.0f;
+  }
+}
+
+int World::weather_area(int x) const {
+  if (moisture_.empty()) return 0;
+  return std::min(wrap_x(x) / std::max(1, weather_.region_width), static_cast<int>(moisture_.size()) - 1);
 }
 
 void World::begin_step() {
@@ -121,7 +124,7 @@ void World::set(int x, int y, MaterialId material) {
   const MaterialProps& p = materials_->props(material);
   c.material[i] = material;
   c.set_shade(i, cell_hash(seed_, x, y, 0) & 0x0F);
-  c.set_temperature(i, p.spawn_temp);  // ambient unless the material defines one
+  c.set_temperature(i, p.has_spawn_temp ? p.spawn_temp : ambient_at(y));  // the air's, unless it has its own
   c.motion[i] = 0;                    // at rest, no lifetime
   c.health[i] = Chunk::kFullHealth;
   if (p.lifetime_max > 0) {
@@ -175,10 +178,36 @@ void World::fill_circle(int cx, int cy, int radius, MaterialId material, float c
 }
 
 void World::clear() {
-  for (auto& c : chunks_) {
+  for (std::size_t i = 0; i < chunks_.size(); ++i) {
+    if (!chunks_[i]) continue;
+    *chunks_[i] = std::move(*make_empty_chunk(static_cast<int>(i) / width_chunks_));
+    chunks_[i]->touched = true;
+  }
+}
+
+std::unique_ptr<Chunk> World::make_empty_chunk(int cy) const {
+  auto c = std::make_unique<Chunk>();
+  for (int ly = 0; ly < kChunkSize; ++ly) {
+    const int t = ambient_at((cy << kChunkShift) + ly);
+    if (t == kAmbient) continue;
+    for (int lx = 0; lx < kChunkSize; ++lx) c->set_temperature(Chunk::index(lx, ly), t);
+  }
+  c->touched = false;
+  return c;
+}
+
+void World::settle_temperatures() {
+  for (std::size_t i = 0; i < chunks_.size(); ++i) {
+    Chunk* c = chunks_[i].get();
     if (!c) continue;
-    *c = Chunk{};
-    c->touched = true;
+    const int cy = static_cast<int>(i) / width_chunks_;
+    for (int ly = 0; ly < kChunkSize; ++ly) {
+      const int t = ambient_at((cy << kChunkShift) + ly);
+      for (int lx = 0; lx < kChunkSize; ++lx) {
+        const int k = Chunk::index(lx, ly);
+        if (!materials_->props(c->material[k]).has_spawn_temp) c->set_temperature(k, t);
+      }
+    }
   }
 }
 

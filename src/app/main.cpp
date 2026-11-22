@@ -20,10 +20,13 @@
 //   J              cool brush: freezes water, hardens lava, puts out fire
 //   I              toggle the pixel inspector (what is under the cursor)
 //   [ / ]          nudge the wind left / right (it also changes by itself)
+//   K              make it rain here (fills this area's weather with moisture)
 //
-// Weather: steam (9) rises and cools into cloud, which gathers in a layer
-// above the ground and rains where it is thick. Wind pushes clouds, smoke,
-// steam, flames and falling rain.
+// Weather: the world is cut into areas ~1000 cells wide whose moisture builds
+// up, drifts with the wind and is fed by steam rising out of sight; when an
+// area is wet enough, it rains there (snow where the air is freezing), falling
+// into view from above. The air gets colder the higher you go. Wind pushes
+// smoke, steam, flames, rain and snow.
 //   T              toggle heat view (temperature map)
 //   P              pause / resume
 //   . (period)     single step while paused
@@ -63,8 +66,10 @@
 #include "core/material.hpp"
 #include "core/rng.hpp"
 #include "core/simulator.hpp"
+#include "core/weather.hpp"
 #include "core/world.hpp"
 #include "entities/player.hpp"
+#include "render/background.hpp"
 #include "render/pixel_renderer.hpp"
 #include "render/sprites.hpp"
 #include "render/text.hpp"
@@ -103,21 +108,29 @@ constexpr int kPrefetchMargin = 2;
 constexpr int kKeepMargin = 3;
 constexpr int kPrefetchPerFrame = 6;
 const char* const kQuickSave = "saves/quicksave";
-// Weather: the cloud layer sits this far above the mean ground level, and the
-// wind wanders up to this fast (cells/step; 0.3 = 18 cells/s) over about a minute.
-constexpr int kCloudHeight = 200;
+// Weather (see px::Weather): steam rising this far above the mean ground
+// leaves the world (out of sight) and feeds the rain; the air cools by this
+// much per cell of height (0.03: freezing ~730 cells up); weather areas this
+// wide each build up moisture and rain on their own; the wind wanders up to
+// this fast (cells/step; 0.3 = 18 cells/s) over about a minute.
+constexpr int kVapourHeight = 300;
+constexpr float kLapseRate = 0.03f;
+constexpr int kWeatherArea = 1024;
 constexpr float kMaxWind = 0.3f;
 constexpr int kWindPeriod = 3600;
 
-/// Clouds a fixed height above the mean ground, wind calm below ground level.
-px::Weather weather_for(int ground_y) {
+px::Weather weather_for(int ground_y, int area_width = kWeatherArea) {
   px::Weather sky;
-  sky.clouds = true;
-  sky.cloud_top = std::max(0, ground_y - kCloudHeight);
-  sky.cloud_wobble = 16;
+  sky.ground_y = ground_y;
+  sky.lapse_rate = kLapseRate;
+  sky.vapour_y = std::max(1, ground_y - kVapourHeight);
+  sky.region_width = area_width;
+  sky.humidity_rate = 0.3f;  // an area rains every few minutes on its own
+  sky.rain_start = 2000.0f;
+  sky.rain_stop = 300.0f;
+  sky.rain_per_step = 6.0f;  // drops per step over a whole area at full strength
   sky.max_wind = kMaxWind;
   sky.wind_period = kWindPeriod;
-  sky.ground_y = ground_y;
   return sky;
 }
 
@@ -129,6 +142,7 @@ struct Session {
   std::optional<px::WorldGenerator> generator;    // recreates untouched chunks
   std::optional<px::WorldGenParams> gen_params;   // recorded in saves
   std::unique_ptr<px::ChunkStreamer> streamer;
+  std::unique_ptr<px::ParallaxBackground> background;
   double home_x = 0.0, home_y = 0.0;              // camera start
   px::Player player;
   bool player_placed = false;                     // placed once its chunks are loaded
@@ -219,9 +233,9 @@ int main(int argc, char** argv) {
       session->world = std::make_unique<px::World>(kDemoChunksX, kDemoChunksY, materials, s);
       px::build_demo_scene(*session->world, ids);
       session->spawn_x = 12.0f;  // on the ground left of the water basin
-      px::Weather sky = weather_for(session->world->height() - 40);
-      sky.cloud_top = 40;  // a small world: clouds near the top
-      session->world->set_weather(sky);
+      session->world->set_weather(weather_for(session->world->height() - 40, 256));  // a small world: small areas
+      session->world->settle_temperatures();  // built by hand: put the sky at its altitude's temperature
+      session->background = std::make_unique<px::ParallaxBackground>(s, session->world->height() - 40);
       return session;
     }
     session->world = std::make_unique<px::World>(kWorldChunksX, kWorldChunksY, materials, s, px::EdgeX::Wrap,
@@ -232,6 +246,11 @@ int main(int argc, char** argv) {
     attach_streaming(*session);
     session->world->set_weather(
         weather_for(static_cast<int>(session->gen_params->surface * static_cast<float>(session->world->height()))));
+    {
+      const px::WorldGenerator* gen = &*session->generator;
+      session->background = std::make_unique<px::ParallaxBackground>(
+          s, session->world->weather().ground_y, [gen](int x) { return gen->surface_y(x); });
+    }
     session->home_x = session->world->width() / 2.0 - w / 2.0;
     session->home_y =
         std::clamp(session->generator->surface_y(session->world->width() / 2) - h / 3, 0, session->world->height() - h);
@@ -255,6 +274,14 @@ int main(int argc, char** argv) {
     session->store->set_base(save->chunk_dir, save->remap);
     const float surface = session->gen_params ? session->gen_params->surface : 0.8f;  // no generator: low ground
     session->world->set_weather(weather_for(static_cast<int>(surface * static_cast<float>(session->world->height()))));
+    if (session->generator) {
+      const px::WorldGenerator* gen = &*session->generator;
+      session->background = std::make_unique<px::ParallaxBackground>(
+          session->world->seed(), session->world->weather().ground_y, [gen](int x) { return gen->surface_y(x); });
+    } else {
+      session->background =
+          std::make_unique<px::ParallaxBackground>(session->world->seed(), session->world->weather().ground_y);
+    }
     session->home_x = save->info.view_x;
     session->home_y = save->info.view_y;
     session->spawn_x = static_cast<float>(save->info.view_x + w / 2 - 8);
@@ -490,12 +517,18 @@ int main(int argc, char** argv) {
             case SDLK_RIGHTBRACKET: {
               px::Weather sky = world.weather();
               sky.wind_bias += e.key.keysym.sym == SDLK_RIGHTBRACKET ? 0.05f : -0.05f;
-              world.set_weather(sky);
+              world.tune_weather(sky);
               char msg[64];
               std::snprintf(msg, sizeof(msg), "wind nudged %+.0f cells/s", static_cast<double>(sky.wind_bias) * 60.0);
               show(msg);
               break;
             }
+            case SDLK_k:
+              if (world.weather_areas() > 0) {
+                world.moisture(world.weather_area(cam_ix() + w / 2)) += world.weather().rain_start * 1.5f;
+                show("rain is coming");
+              }
+              break;
             case SDLK_HOME:
               cam_x = session->home_x;
               cam_y = session->home_y;
@@ -628,6 +661,7 @@ int main(int argc, char** argv) {
         px::apply_thermal_brush(world, mx + cam_ix(), my + cam_iy(), brush.radius,
                                 tool == Tool::Heat ? px::kHeatBrush : px::kCoolBrush);
       }
+      px::update_weather(world, region);  // rain falls in from above the view
       const bool move_player = session->player_placed && player_loaded();
       if (move_player) {
         player.update(world, input);
@@ -648,8 +682,14 @@ int main(int argc, char** argv) {
     }
 
     const px::Viewport view{cam_ix(), cam_iy(), w, h};
-    if (show_heat) renderer.render_temperature(world, pixels.data(), w, view);
-    else renderer.render(world, pixels.data(), w, view);
+    if (show_heat) {
+      renderer.render_temperature(world, pixels.data(), w, view);
+    } else if (session->background) {
+      session->background->render(pixels.data(), w, w, h, cam_x, cam_y);  // sky and far hills, behind
+      renderer.render(world, pixels.data(), w, view, /*draw_air=*/false);
+    } else {
+      renderer.render(world, pixels.data(), w, view);
+    }
     if (show_dirty) renderer.draw_dirty_rects(world, pixels.data(), w, view);
     if (session->player_placed) {
       int sx = player.left() - cam_ix();
@@ -672,6 +712,12 @@ int main(int argc, char** argv) {
       if (arrows == 0) wind_text += "calm";
       else wind_text += std::string(static_cast<std::size_t>(arrows), wind > 0 ? '>' : '<') + " " +
                         std::to_string(static_cast<int>(std::lround(std::fabs(wind))));
+      if (world.weather_areas() > 0) {  // the weather overhead
+        const int area = world.weather_area(cam_ix() + w / 2);
+        if (world.raining(area)) wind_text += world.ambient_at(cam_iy()) < 0 ? "  snowing" : "  raining";
+        else wind_text += "  humidity " + std::to_string(static_cast<int>(100.0f * world.moisture(area) /
+                                                                         world.weather().rain_start)) + "%";
+      }
       lines.insert(lines.begin(), tool_name() + "  r" + std::to_string(brush.radius) + "  " + wind_text +
                                       (paused ? "  paused" : ""));
       int pw = 0;

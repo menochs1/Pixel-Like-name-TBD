@@ -107,7 +107,7 @@ void for_each_run(const World& world, const Viewport& v, Fn&& fn) {
 
 }  // namespace
 
-void PixelRenderer::render(const World& world, std::uint32_t* pixels, int pitch, Viewport view) const {
+void PixelRenderer::render(const World& world, std::uint32_t* pixels, int pitch, Viewport view, bool draw_air) const {
   sync_palette();
   const Viewport v = resolve(world, view);
   const std::uint32_t tick = world.tick();
@@ -129,6 +129,7 @@ void PixelRenderer::render(const World& world, std::uint32_t* pixels, int pitch,
       for (int k = 0; k < n; ++k) {
         const int i = base + k;
         const MaterialId m = c.material[i];
+        if (m == kEmpty && !draw_air) continue;  // the background shows through
         std::uint32_t shade = c.shade(i);
         if (flicker_[m]) {
           shade = hash32(static_cast<std::uint32_t>(wx + k) * 0x9E3779B1U ^ static_cast<std::uint32_t>(wy) * 0x85EBCA77U ^
@@ -136,6 +137,12 @@ void PixelRenderer::render(const World& world, std::uint32_t* pixels, int pitch,
         }
         const std::uint32_t col = palette_[m][shade & (kShades - 1)];
         row[sx + k] = m == kEmpty ? col : glow(col, c.temperature(i));
+        // Falling liquid (rain) as a short streak, so single drops read
+        // against the sky: a deeper drop with a paler trail above it.
+        if (materials_->props(m).phase == Phase::Liquid && c.fall_speed(i) > 1 && c.temperature(i) < 100) {
+          row[sx + k] = 0xFF2A4C9AU;
+          if (sy > 0 && world.get(wx + k, wy - 1) == kEmpty) row[sx + k - pitch] = 0xFF7896C8U;
+        }
       }
     });
   }

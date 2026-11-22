@@ -271,7 +271,7 @@ std::unique_ptr<World> load_world(const fs::path& dir, MaterialRegistry& materia
       } else if (gen) {
         gen->generate_chunk(w, cx, cy);
       } else {
-        w.load_chunk(cx, cy, std::make_unique<Chunk>());
+        w.load_chunk(cx, cy, w.make_empty_chunk(cy));
       }
     }
   }

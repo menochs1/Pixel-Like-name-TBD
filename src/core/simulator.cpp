@@ -190,8 +190,9 @@ void update_air(StepContext& ctx, int x, int y) {
   const int i = World::local_index(x, y);
   const bool flowed = heat_turn(ctx, x, y) && exchange_heat(ctx, x, y, ctx.materials.props(kEmpty).conductivity);
   const int t = c.temperature(i);
-  int relax = (kAmbient - t) / 8;
-  if (relax == 0) relax = (t > kAmbient) ? -1 : (t < kAmbient ? 1 : 0);
+  const int ambient = ctx.world.ambient_at(y);  // colder up high
+  int relax = (ambient - t) / 8;
+  if (relax == 0) relax = (t > ambient) ? -1 : (t < ambient ? 1 : 0);
   c.set_temperature(i, t + relax);
   if (relax != 0 && !flowed) ctx.world.wake(x, y);  // a heat flow already woke the 5x5
 }
@@ -231,8 +232,8 @@ int fall(StepContext& ctx, int x, int y, MaterialId m, int velocity) {
 /// direction), or 0. A cell blown at w cells/step moves one cell on a fraction
 /// of steps, the same steps for every cell, and only on steps whose scan runs
 /// from the downwind edge (odd ticks scan left to right): each cell then moves
-/// into the space its downwind neighbour just left, so a cloud travels as one
-/// instead of only its edge peeling off.
+/// into the space its downwind neighbour just left, so a body of smoke or a
+/// sheet of rain travels as one instead of only its edge peeling off.
 int wind_step(const StepContext& ctx, int y) {
   const float w = ctx.world.wind_at(y);
   if (w == 0.0f) return 0;
@@ -257,7 +258,16 @@ int slide_diagonal(StepContext& ctx, int x, int y, MaterialId m, int first) {
 }
 
 bool update_powder(StepContext& ctx, int x, int y, MaterialId m, int velocity, Rng& rng) {
-  if (fall(ctx, x, y, m, velocity) != y) return true;
+  if (const int ny = fall(ctx, x, y, m, velocity); ny != y) {
+    // Light powder falling through the air (snow) drifts with the wind.
+    if (ctx.materials.props(m).windblown) {
+      const int d = wind_step(ctx, ny);
+      if (d != 0 && ctx.world.get(x + d, ny) == kEmpty && is_open(ctx.materials, ctx.world.get(x + d, ny + 1))) {
+        swap_cells(ctx, x, ny, x + d, ny);
+      }
+    }
+    return true;
+  }
   return slide_diagonal(ctx, x, y, m, rng.direction()) != 0;
 }
 
@@ -343,15 +353,15 @@ bool update_gas(StepContext& ctx, int x, int y, MaterialId m, const MaterialProp
       return true;
     }
   }
-  // Cloud rises to the cloud layer and no higher; above it, it sinks back.
+  // Vapour that rises high enough leaves the world: it becomes moisture in the
+  // weather overhead (core/weather.hpp) and comes back down as rain.
   const Weather& sky = ctx.world.weather();
-  const int ceiling = p.hovers && sky.clouds ? ctx.world.cloud_ceiling(x) : 0;
-  const bool capped = p.hovers && sky.clouds && y <= ceiling;
-  if (p.hovers && sky.clouds && y < ceiling && ctx.world.get(x, y + 1) == kEmpty) {
-    swap_cells(ctx, x, y, x, y + 1);
+  if (p.joins_weather && sky.vapour_y > 0 && y <= sky.vapour_y && ctx.world.weather_areas() > 0) {
+    ctx.world.add_moisture(x, 1.0f);
+    transform(ctx, x, y, kEmpty, 0, rng);
     return true;
   }
-  if (!capped && rng.chance(p.rise_chance)) {
+  if (rng.chance(p.rise_chance)) {
     const MaterialId up = ctx.world.get(x, y - 1);
     if (up == kEmpty) {
       swap_cells(ctx, x, y, x, y - 1);
@@ -461,7 +471,7 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
   // never runs heat code itself (one at ambient) is skipped, and chunked
   // simulation drifts from updating every cell. Cells with nothing to exchange
   // (gaps of 1, insulated) may sleep.
-  if (c.temperature(i) != kAmbient) {
+  if (c.temperature(i) != ctx.world.ambient_at(y)) {
     const bool flows = heat_turn(ctx, x, y) ? exchange_heat(ctx, x, y, p.conductivity)
                                             : exchange_heat<false>(ctx, x, y, p.conductivity);
     if (flows) keep_awake = true;
@@ -493,7 +503,7 @@ enum class StateResult { Unchanged, KeepAwake, Transformed };
     keep_awake = true;
   }
 
-  // Crowding (dense cloud condenses into rain).
+  // Crowding (e.g. a dense gas condensing).
   if (p.crowd_count > 0) {
     keep_awake = true;
     int same = 0;
@@ -543,7 +553,7 @@ void update_cell(StepContext& ctx, int x, int y) {
   if (c.was_updated(i, ctx.tick)) return;
   const MaterialId m = c.material[i];
   if (m == kEmpty) {
-    if (c.temperature(i) != kAmbient) {
+    if (c.temperature(i) != ctx.world.ambient_at(y)) {
       c.mark_updated(i, ctx.tick);
       update_air(ctx, x, y);
     }
@@ -554,7 +564,12 @@ void update_cell(StepContext& ctx, int x, int y) {
   const MaterialProps& p = ctx.materials.props(m);
   Rng rng{ctx.world.seed(), x, y, ctx.tick};
   bool keep_awake = false;
-  if (p.active_at_ambient || c.temperature(i) != kAmbient || (!p.uses_motion && c.life(i) != 0)) {
+  // State changes are possible if the material changes at rest, the cell is
+  // off its altitude's temperature, a lifetime runs, or it sits past one of
+  // its transition points (water resting in freezing air up high).
+  const int t = c.temperature(i);
+  if (p.active_at_ambient || t != ctx.world.ambient_at(y) || (!p.uses_motion && c.life(i) != 0) ||
+      (p.has_low && t <= p.low_temp) || (p.has_high && t >= p.high_temp)) {
     const StateResult r = update_state(ctx, x, y, m, p, rng);
     if (r == StateResult::Transformed) return;
     keep_awake = r == StateResult::KeepAwake;
