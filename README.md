@@ -111,9 +111,11 @@ Run the sandbox:
 ./build/pixel_sandbox
 ```
 
-The sandbox opens on a generated 16384×1536 world that wraps around
-horizontally, viewed through a 640×360 camera. It is streamed: about 250
-chunks (~7 MiB) are in memory at a time instead of all 6144 (~172 MiB).
+The sandbox opens on a generated 49152×4608 world that wraps around
+horizontally, viewed through a 640×360 camera, with terrain generated at
+scale 3 (hills, biomes, caves, pools and trees three times the size of the
+original 16384×1536 world's). It is streamed: about 270 chunks (~8 MiB) are
+in memory at a time instead of all 55296 (~1.5 GiB).
 `--seed N` picks the world, `--load DIR` starts from a save, and `--demo`
 opens the small hand-built demo scene instead (an oil pit beside a wooden
 tower, a water basin and a lava crucible).
@@ -230,7 +232,10 @@ tested headless. `src/render/sprites.cpp` draws it, with a standing pose, a
 two-frame walk and a jump pose, mirrored when facing left.
 
 - **Collision:** solids and powders (sand) block it; air, liquids and gases do
-  not. The world edges and unloaded chunks count as walls. It moves one axis
+  not. Materials marked `passable` are scenery it walks through: generated
+  tree trunks (`trunk`) and leaves, which are still solid to the simulation
+  and still burn. Painted wood stays solid. The world edges and unloaded
+  chunks count as walls. It moves one axis
   at a time, cell by cell, so it never passes through thin walls.
 - **Movement:** walks at 90 cells/s with a little acceleration, steps up
   ledges up to 4 cells high (the terrain is pixel-rough), stays on the ground
@@ -247,8 +252,8 @@ two-frame walk and a jump pose, mirrored when facing left.
   is pushed out upward.
 - **Tuning:** every number (size, speeds, gravity, jump, step-up, swimming)
   is a field of `PlayerParams`.
-- Saves remember where it stood. The header format is now version 2;
-  version 1 saves still load, with the character dropped in at the camera.
+- Saves remember where it stood (header format version 2 and later; older
+  saves load with the character dropped in at the camera).
 
 ### Sandbox tools
 
@@ -314,6 +319,12 @@ Design points:
   then settles to a handful of active chunks, averaging ~0.2 ms per step.
 - **Scales with size.** Depths are fractions of the world height and feature
   sizes are rounded to fit the width, so any size works.
+- **Feature scale.** `WorldGenParams::scale` multiplies the size of every
+  feature: biomes, hills, dunes, peaks, soil depth, tunnels, caverns, pools,
+  deposits and trees. A world three times larger in each direction with
+  scale 3 is the same world, three times bigger (tested: biomes, surface and
+  underground line up). The app uses scale 3. Saves record the scale (header
+  format version 3).
 
 ### Adding a material
 
@@ -431,6 +442,13 @@ unloading deliberately broken, the test fails.
 
 ## Performance
 
+A step costs what is loaded and active, not the size of the world: the
+simulator loops over loaded chunks only, and each chunk row keeps a list of
+the columns with work this step (a wake-up during the step adds to it). The
+scan order is exactly the same as visiting every column. Before this, an
+idle step in the 49152×4608 world took ~7 ms just walking empty columns; it
+now takes ~0.03 ms.
+
 Measured with `pixel_bench --scene rain --steps 600` (2048×1152 world,
 ~118k falling sand and water cells at the start, single thread, Release):
 
@@ -481,9 +499,9 @@ and steam dragged across the whole view for 50 s) on a 2.1 GHz server core:
   stone in 10 seconds. Temperatures are whole degrees and a 1° gap does not
   flow, so buried layers can settle a degree per layer above ambient.
 - Steam and smoke drift as scattered particles rather than billowing clouds.
-- The world is still finite: 16384×1536 for the app, with an index slot per
-  chunk (8 bytes each), even though only the chunks near the camera are in
-  memory. Unbounded worlds would need a sparse chunk index.
+- The world is still finite: 49152×4608 for the app, with an index slot per
+  chunk (8 bytes each, 432 KiB), even though only the chunks near the camera
+  are in memory. Unbounded worlds would need a sparse chunk index.
 - Chunks are loaded on the main thread; prefetching a few per frame keeps
   this smooth at camera speed, but a much faster camera could stutter.
   Generating on a worker thread would fix that.

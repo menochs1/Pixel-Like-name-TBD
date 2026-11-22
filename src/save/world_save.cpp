@@ -14,7 +14,8 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x44575850;  // "PXWD"
-constexpr std::uint16_t kWorldVersion = 2;  // 2: player position; version 1 saves still load
+// 2: player position; 3: generator scale. Older saves still load.
+constexpr std::uint16_t kWorldVersion = 3;
 constexpr const char* kHeaderName = "world.pxw";
 constexpr const char* kChunkDirName = "chunks";
 
@@ -53,6 +54,7 @@ std::vector<std::uint8_t> encode_header(const World& world, const SaveInfo& info
     w.f32(g.lava_depth);
     w.f32(g.oil_depth);
     w.i32(g.bedrock_rows);
+    w.f32(g.scale);
   }
   // Material table, in id order: authored by name, derived by recipe.
   const MaterialRegistry& reg = world.materials();
@@ -202,6 +204,7 @@ std::optional<OpenedSave> open_save(const fs::path& dir, MaterialRegistry& mater
     g.lava_depth = r.f32();
     g.oil_depth = r.f32();
     g.bedrock_rows = r.i32();
+    if (version >= 3) g.scale = r.f32();  // earlier saves: scale 1
     save.info.generator = g;
   }
   if (!r.ok() || wc <= 0 || hc <= 0 || wc > 1 << 16 || hc > 1 << 16) {

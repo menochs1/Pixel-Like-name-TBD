@@ -18,6 +18,11 @@ struct WorldGenParams {
   float lava_depth = 0.74f;      // pools below this are lava
   float oil_depth = 0.46f;       // pools between this and lava_depth may be oil
   int bedrock_rows = 12;         // solid stone band at the bottom (no caves)
+  /// Size of every terrain feature: biomes, hills, dunes and peaks (across),
+  /// soil depth, caves, pools, deposits and trees. 3 makes everything three
+  /// times larger, for a world three times larger. (Heights of hills follow
+  /// the world height on their own.)
+  float scale = 1.0f;
 };
 
 /// Seeded, deterministic terrain generator for a world `width` x `height` cells.
@@ -81,6 +86,8 @@ class WorldGenerator {
   int width_, height_;
   WorldGenParams p_;
   int sea_y_;
+  float s_;          // p_.scale
+  int bedrock_;      // bedrock rows, scaled
   int tree_count_;   // trees are placed in this many equal slots around the ring
   int pool_cols_;    // liquid pools come from a coarse grid: this many columns...
   int pool_rows_;    // ...and rows

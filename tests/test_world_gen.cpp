@@ -135,3 +135,27 @@ TEST(insulator_blocks_heat) {
   CHECK_EQ(w.temperature(30, 28), px::kAmbient);  // ...and so does the rock outside
   CHECK_EQ(w.active_chunk_count(), 0);
 }
+
+// A world three times larger with scale 3 is the same world, three times
+// bigger: biomes in the same places, hills three times as tall and wide, and
+// caves, pools and deposits three times the size.
+TEST(scaled_worlds_are_the_same_world_bigger) {
+  GenFixture f;
+  const int w = 32 * 64, h = 12 * 64;
+  const px::WorldGenerator small(f.ids, 99, w, h);
+  px::WorldGenParams big_params;
+  big_params.scale = 3.0f;
+  const px::WorldGenerator big(f.ids, 99, w * 3, h * 3, big_params);
+  int same_biome = 0, close_surface = 0, samples = 0;
+  for (int x = 0; x < w; x += 7, ++samples) {
+    same_biome += small.biome_at(x) == big.biome_at(x * 3) ? 1 : 0;
+    close_surface += std::abs(big.surface_y(x * 3) - small.surface_y(x) * 3) <= 6 ? 1 : 0;
+  }
+  CHECK(same_biome * 100 >= samples * 97);
+  CHECK(close_surface * 100 >= samples * 95);
+  // Underground, cell (x, y) of the small world matches cell (3x+1, 3y+1) of the big one.
+  int same_cell = 0, cells = 0;
+  for (int y = h / 3; y < h; y += 5)
+    for (int x = 0; x < w; x += 11, ++cells) same_cell += small.material_at(x, y) == big.material_at(x * 3 + 1, y * 3 + 1) ? 1 : 0;
+  CHECK(same_cell * 100 >= cells * 85);
+}

@@ -111,6 +111,7 @@ MaterialProps MaterialRegistry::resolve(const MaterialDef& d) const {
   p.emit_chance = to_chance(d.emit_chance);
   p.uses_motion = d.phase == Phase::Powder || d.phase == Phase::Liquid;
   p.durability = d.durability;
+  p.passable = d.passable;
   return p;
 }
 
@@ -535,6 +536,7 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     d.high_chance = 0.15f;
     d.burn_time = 30;
     d.durability = 5;
+    d.passable = true;  // scenery: the player walks through foliage
     ids.leaves = add(d);
   }
 
@@ -573,6 +575,24 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     ids.tar = add(d);
   }
 
+  {
+    // Wood that grew as a tree: burns like wood, but the player walks past it
+    // (trees are scenery). Painted wood stays solid for building.
+    MaterialDef d;
+    d.name = "trunk";
+    d.phase = Phase::Solid;
+    d.density = 700;
+    d.color = {110, 72, 42};
+    d.color_variation = 14;
+    d.conductivity = 0.15f;
+    d.high_temp = 260;
+    d.high_to = "fire";
+    d.high_chance = 0.04f;
+    d.burn_time = 200;
+    d.durability = 40;
+    d.passable = true;
+    ids.trunk = add(d);
+  }
   {
     // Where the player stands, for the length of one simulation step
     // (Player::occupy/release): solid, so sand piles on it and water flows

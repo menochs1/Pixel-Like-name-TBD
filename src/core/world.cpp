@@ -20,15 +20,46 @@ World::World(int width_chunks, int height_chunks, MaterialRegistry& materials, s
     throw std::invalid_argument("World: dimensions must be positive");
   }
   chunks_.resize(static_cast<std::size_t>(width_chunks) * static_cast<std::size_t>(height_chunks));
+  active_rows_.resize(static_cast<std::size_t>(height_chunks));
   if (storage == ChunkStorage::AllLoaded) {
-    for (auto& c : chunks_) c = std::make_unique<Chunk>();
+    for (std::size_t i = 0; i < chunks_.size(); ++i) {
+      chunks_[i] = std::make_unique<Chunk>();
+      loaded_.push_back(static_cast<int>(i));
+    }
   }
 }
 
 Chunk& World::load_chunk(int cx, int cy, std::unique_ptr<Chunk> chunk) {
   auto& s = chunks_[slot(cx, cy)];
+  if (!s && chunk) loaded_.push_back(static_cast<int>(slot(cx, cy)));
   s = std::move(chunk);
   return *s;
+}
+
+std::unique_ptr<Chunk> World::unload_chunk(int cx, int cy) {
+  auto& s = chunks_[slot(cx, cy)];
+  if (s) {
+    const int id = static_cast<int>(slot(cx, cy));
+    for (std::size_t i = 0; i < loaded_.size(); ++i) {
+      if (loaded_[i] == id) {
+        loaded_[i] = loaded_.back();
+        loaded_.pop_back();
+        break;
+      }
+    }
+  }
+  return std::move(s);
+}
+
+void World::begin_step() {
+  for (auto& row : active_rows_) row.clear();
+  stepping_ = true;
+}
+
+void World::note_active(int cx, int cy) {
+  std::vector<int>& row = active_rows_[static_cast<std::size_t>(cy)];
+  const auto it = std::lower_bound(row.begin(), row.end(), cx);
+  if (it == row.end() || *it != cx) row.insert(it, cx);
 }
 
 int World::loaded_chunk_count() const {
@@ -116,6 +147,7 @@ void World::wake(int x, int y) {
   // Fast path: the 3x3 neighbourhood lies inside one chunk (true for ~94% of cells).
   if (lx > 0 && lx < kChunkMask && ly > 0 && ly < kChunkMask && in_bounds(x, y)) {
     Chunk& c = chunk_for(x, y);
+    if (stepping_ && c.dirty.empty()) note_active(chunk_x(x), y >> kChunkShift);
     c.dirty.include_rect(lx - 1, ly - 1, lx + 1, ly + 1);
     c.next_dirty.include_rect(lx - 1, ly - 1, lx + 1, ly + 1);
     c.touched = true;
@@ -127,6 +159,7 @@ void World::wake(int x, int y) {
       const int nx = x + dx;
       if (!in_bounds(nx, ny)) continue;
       Chunk& c = chunk_for(nx, ny);
+      if (stepping_ && c.dirty.empty()) note_active(chunk_x(nx), ny >> kChunkShift);
       c.dirty.include(nx & kChunkMask, ny & kChunkMask);
       c.next_dirty.include(nx & kChunkMask, ny & kChunkMask);
       c.touched = true;
@@ -139,6 +172,7 @@ void World::wake_area(int x, int y, int r) {
   const int ly = y & kChunkMask;
   if (lx >= r && lx < kChunkSize - r && ly >= r && ly < kChunkSize - r && in_bounds(x, y)) {
     Chunk& c = chunk_for(x, y);
+    if (stepping_ && c.dirty.empty()) note_active(chunk_x(x), y >> kChunkShift);
     c.dirty.include_rect(lx - r, ly - r, lx + r, ly + r);
     c.next_dirty.include_rect(lx - r, ly - r, lx + r, ly + r);
     c.touched = true;
@@ -148,6 +182,7 @@ void World::wake_area(int x, int y, int r) {
   auto mark = [&](int bx0, int by0, int bx1, int by1) {
     if (!in_bounds(bx0, by0)) return;
     Chunk& c = chunk_for(bx0, by0);
+    if (stepping_ && c.dirty.empty()) note_active(chunk_x(bx0), by0 >> kChunkShift);
     c.dirty.include_rect(bx0 & kChunkMask, by0 & kChunkMask, bx1 & kChunkMask, by1 & kChunkMask);
     c.next_dirty.include_rect(bx0 & kChunkMask, by0 & kChunkMask, bx1 & kChunkMask, by1 & kChunkMask);
     c.touched = true;

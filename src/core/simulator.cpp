@@ -535,66 +535,82 @@ StepStats step_impl(World& world, const ChunkRegion* region) {
   const int hc = world.height_chunks();
 
   // Which chunks run this step (all of them without a region).
-  std::vector<std::uint8_t> active;
+  int rx0 = 0, rx1 = wc - 1, ry0 = 0, ry1 = hc - 1;
+  bool every_column = true;
   if (region) {
-    active.assign(static_cast<std::size_t>(wc) * static_cast<std::size_t>(hc), 0);
-    const int y0 = std::max(region->cy0, 0), y1 = std::min(region->cy1, hc - 1);
-    int x0 = region->cx0, x1 = region->cx1;
+    ry0 = std::max(region->cy0, 0);
+    ry1 = std::min(region->cy1, hc - 1);
+    rx0 = region->cx0;
+    rx1 = region->cx1;
     if (!world.wraps_x()) {
-      x0 = std::max(x0, 0);
-      x1 = std::min(x1, wc - 1);
-    } else if (x1 - x0 + 1 >= wc) {
-      x0 = 0;
-      x1 = wc - 1;
-    }
-    for (int cy = y0; cy <= y1; ++cy) {
-      for (int cx = x0; cx <= x1; ++cx) {
-        const int wx = ((cx % wc) + wc) % wc;
-        active[static_cast<std::size_t>(cy * wc + wx)] = 1;
-      }
+      rx0 = std::max(rx0, 0);
+      rx1 = std::min(rx1, wc - 1);
+      every_column = false;
+    } else {
+      every_column = rx1 - rx0 + 1 >= wc;
     }
   }
+  auto in_region = [&](int cx, int cy) {
+    if (cy < ry0 || cy > ry1) return false;
+    if (every_column) return true;
+    if (!world.wraps_x()) return cx >= rx0 && cx <= rx1;
+    return (((cx - rx0) % wc) + wc) % wc <= rx1 - rx0;  // distance from the region's left edge, around the ring
+  };
 
-  for (int cy = 0; cy < hc; ++cy) {
-    for (int cx = 0; cx < wc; ++cx) {
-      Chunk* cp = world.chunk_ptr(cx, cy);
-      if (!cp) continue;  // not loaded
-      Chunk& c = *cp;
-      if (region && !active[static_cast<std::size_t>(cy * wc + cx)]) {
-        // Paused: keep the pending work for when the region comes back.
-        c.dirty.reset();
-        stats.paused_chunks += c.next_dirty.empty() ? 0 : 1;
-        continue;
-      }
-      if (!c.next_dirty.empty()) c.touched = true;  // its pending work is consumed now
-      c.dirty = c.next_dirty;
-      c.next_dirty.reset();
+  // Only loaded chunks: a step costs what is loaded and active, not the world's size.
+  world.begin_step();
+  for (const int slot : world.loaded_slots()) {
+    const int cx = slot % wc, cy = slot / wc;
+    Chunk& c = world.chunk(cx, cy);
+    if (region && !in_region(cx, cy)) {
+      // Paused: keep the pending work for when the region comes back.
+      c.dirty.reset();
+      stats.paused_chunks += c.next_dirty.empty() ? 0 : 1;
+      continue;
     }
+    if (!c.next_dirty.empty()) c.touched = true;  // its pending work is consumed now
+    c.dirty = c.next_dirty;
+    c.next_dirty.reset();
+    if (!c.dirty.empty()) world.note_active(cx, cy);
   }
 
   // Scan whole world rows, bottom to top, visiting only the dirty span of each
   // chunk in that row. Scanning chunk-by-chunk instead (all rows of one chunk,
   // then the next) makes material behave differently at chunk edges: liquids
   // pile up into walls along the 64-pixel grid.
+  //
+  // Each chunk row keeps the columns with dirty cells; a wake-up during the
+  // step that gives a chunk its first dirty cells adds it. Columns are visited
+  // in scan order by looking up the next one past the last visited, so a chunk
+  // added ahead of the scan is still reached this row and one added behind it
+  // waits for the next, exactly as scanning every column would.
   const bool left_to_right = (tick & 1U) != 0;
-  static const DirtyRect kNothing;  // stands in for unloaded chunks
-  auto dirty_of = [&](int cx, int cy) -> const DirtyRect& {
-    const Chunk* c = world.chunk_ptr(cx, cy);
-    return c ? c->dirty : kNothing;
-  };
   for (int cy = hc - 1; cy >= 0; --cy) {
-    for (int cx = 0; cx < wc; ++cx) {
-      const DirtyRect& rect = dirty_of(cx, cy);
-      if (rect.empty()) continue;
+    if (world.active_columns(cy).empty()) continue;
+    for (const int cx : world.active_columns(cy)) {
+      const DirtyRect& rect = world.chunk(cx, cy).dirty;
       ++stats.active_chunks;
       stats.cells_scanned += rect.area();
     }
     const int base_y = cy << kChunkShift;
     for (int ly = kChunkMask; ly >= 0; --ly) {
-      for (int i = 0; i < wc; ++i) {
-        const int cx = left_to_right ? i : wc - 1 - i;
-        const DirtyRect& rect = dirty_of(cx, cy);
-        if (ly < rect.min_y || ly > rect.max_y) continue;  // also skips empty rects
+      int last = left_to_right ? -1 : wc;
+      for (;;) {
+        // The next column past `last` in scan order (the list is sorted).
+        const std::vector<int>& cols = world.active_columns(cy);
+        int cx;
+        if (left_to_right) {
+          const auto it = std::upper_bound(cols.begin(), cols.end(), last);
+          if (it == cols.end()) break;
+          cx = *it;
+        } else {
+          const auto it = std::lower_bound(cols.begin(), cols.end(), last);
+          if (it == cols.begin()) break;
+          cx = *(it - 1);
+        }
+        last = cx;
+        const DirtyRect& rect = world.chunk(cx, cy).dirty;
+        if (ly < rect.min_y || ly > rect.max_y) continue;
         const int base_x = cx << kChunkShift;
         if (left_to_right) {
           for (int lx = rect.min_x; lx <= rect.max_x; ++lx) update_cell(ctx, base_x + lx, base_y + ly);
@@ -604,6 +620,7 @@ StepStats step_impl(World& world, const ChunkRegion* region) {
       }
     }
   }
+  world.end_step();
   return stats;
 }
 

@@ -89,6 +89,9 @@ struct MaterialDef {
   /// Used by the engine itself (the player's body) and not offered as a
   /// paintable material.
   bool internal = false;
+  /// The player walks through it although it is solid to the simulation
+  /// (foliage: tree trunks and leaves are scenery, not walls).
+  bool passable = false;
 };
 
 /// Hot, resolved per-material properties used by the simulator's inner loop.
@@ -128,6 +131,7 @@ struct MaterialProps {
   /// variant of tar reacts like tar.
   MaterialId base = kEmpty;
   std::uint16_t durability = 0;
+  bool passable = false;  // the player walks through it
 };
 
 /// How a reaction computes a product's properties from its two parents, the
@@ -284,6 +288,7 @@ struct BaseMaterials {
   MaterialId basalt = kEmpty;
   MaterialId tar = kEmpty;
   MaterialId body = kEmpty;
+  MaterialId trunk = kEmpty;
 };
 
 /// Registers the built-in materials and reactions, finalizes the registry and

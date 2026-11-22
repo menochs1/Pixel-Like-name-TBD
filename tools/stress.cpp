@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     px::build_demo_scene(w, ids);
     const px::MaterialId palette[] = {px::kEmpty, ids.stone, ids.sand,  ids.water, ids.oil,  ids.wood,
                                       ids.fire,   ids.flame, ids.smoke, ids.steam, ids.lava, ids.ice,
-                                      ids.dirt,   ids.grass, ids.coal,  ids.leaves, ids.basalt, ids.tar};
+                                      ids.dirt,   ids.grass, ids.coal,  ids.leaves, ids.basalt, ids.tar, ids.trunk};
     std::uint32_t seed = 777;
     auto rnd = [&](int n) {
       seed = px::hash32(seed + 0x9E3779B9U);

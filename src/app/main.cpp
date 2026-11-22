@@ -72,8 +72,9 @@
 
 namespace {
 
-constexpr int kWorldChunksX = 256;  // 16384 x 1536 cells, wrapping around in x (streamed)
-constexpr int kWorldChunksY = 24;
+constexpr int kWorldChunksX = 768;  // 49152 x 4608 cells, wrapping around in x (streamed)
+constexpr int kWorldChunksY = 72;
+constexpr float kWorldScale = 3.0f;  // terrain features to match: 3x the 16384 x 1536 world
 constexpr int kDemoChunksX = 8;  // 512 x 320 cells
 constexpr int kDemoChunksY = 5;
 constexpr int kViewW = 640;  // camera size in cells
@@ -201,13 +202,15 @@ int main(int argc, char** argv) {
     session->world = std::make_unique<px::World>(kWorldChunksX, kWorldChunksY, materials, s, px::EdgeX::Wrap,
                                                  px::ChunkStorage::Streamed);
     session->gen_params = px::WorldGenParams{};
+    session->gen_params->scale = kWorldScale;
     session->generator.emplace(ids, s, session->world->width(), session->world->height(), *session->gen_params);
     attach_streaming(*session);
     session->home_x = session->world->width() / 2.0 - w / 2.0;
     session->home_y =
         std::clamp(session->generator->surface_y(session->world->width() / 2) - h / 3, 0, session->world->height() - h);
     session->spawn_x = static_cast<float>(session->world->width() / 2 - 8);
-    session->spawn_from_y = session->generator->surface_y(session->world->width() / 2) - 80;  // above the trees
+    session->spawn_from_y =
+        session->generator->surface_y(session->world->width() / 2) - static_cast<int>(80 * kWorldScale);  // above the trees
     return session;
   };
   // Saves always load streamed, whatever they came from.

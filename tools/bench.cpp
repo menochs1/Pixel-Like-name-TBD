@@ -1,6 +1,6 @@
 // Headless benchmark and snapshot tool.
 //
-//   pixel_bench [--scene rain|demo|gen] [--seed N] [--steps N] [--ppm out.ppm]
+//   pixel_bench [--scene rain|demo|gen] [--seed N] [--scale S] [--steps N] [--ppm out.ppm]
 //
 // Runs the simulation without a window, reports per-step timing and activity,
 // and can write the final frame as a binary PPM image. `gen` generates the
@@ -47,13 +47,15 @@ int main(int argc, char** argv) {
   std::string ppm;
   int steps = 600;
   std::uint64_t seed = 0xC0FFEEULL;
+  float scale = 1.0f;  // gen: a world this many times larger, with terrain features to match
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) scene = argv[++i];
     else if (std::strcmp(argv[i], "--steps") == 0 && i + 1 < argc) steps = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--ppm") == 0 && i + 1 < argc) ppm = argv[++i];
     else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) seed = std::strtoull(argv[++i], nullptr, 0);
+    else if (std::strcmp(argv[i], "--scale") == 0 && i + 1 < argc) scale = static_cast<float>(std::atof(argv[++i]));
     else {
-      std::fprintf(stderr, "usage: %s [--scene rain|demo|gen] [--seed N] [--steps N] [--ppm out.ppm]\n", argv[0]);
+      std::fprintf(stderr, "usage: %s [--scene rain|demo|gen] [--seed N] [--scale S] [--steps N] [--ppm out.ppm]\n", argv[0]);
       return 2;
     }
   }
@@ -62,11 +64,14 @@ int main(int argc, char** argv) {
   const px::BaseMaterials ids = px::register_base_materials(materials);
   const bool rain = scene == "rain";
   const bool gen = scene == "gen";
-  px::World world(gen ? 64 : (rain ? 32 : 8), gen ? 24 : (rain ? 18 : 5), materials, seed,
+  const int gs = std::max(1, static_cast<int>(scale + 0.5f));
+  px::World world(gen ? 64 * gs : (rain ? 32 : 8), gen ? 24 * gs : (rain ? 18 : 5), materials, seed,
                   gen ? px::EdgeX::Wrap : px::EdgeX::Wall);
   if (gen) {
     const auto t0 = std::chrono::steady_clock::now();
-    px::generate_world(world, ids);
+    px::WorldGenParams params;
+    params.scale = scale;
+    px::generate_world(world, ids, params);
     std::printf("generated in %.0f ms\n",
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
   } else if (rain) {

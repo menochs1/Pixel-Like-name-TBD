@@ -109,6 +109,7 @@ class World {
   /// Marks just (x, y) for update this step (if not yet passed) and next step.
   void wake_cell(int x, int y) {
     Chunk& c = chunk_for(x, y);
+    if (stepping_ && c.dirty.empty()) note_active(chunk_x(x), y >> kChunkShift);
     c.dirty.include(x & kChunkMask, y & kChunkMask);
     c.next_dirty.include(x & kChunkMask, y & kChunkMask);
     c.touched = true;
@@ -131,7 +132,7 @@ class World {
   /// Puts `chunk` at (cx, cy), replacing whatever was there.
   Chunk& load_chunk(int cx, int cy, std::unique_ptr<Chunk> chunk);
   /// Takes chunk (cx, cy) out of the world (nullptr if it was not loaded).
-  std::unique_ptr<Chunk> unload_chunk(int cx, int cy) { return std::move(chunks_[slot(cx, cy)]); }
+  std::unique_ptr<Chunk> unload_chunk(int cx, int cy);
 
   /// Chunk holding cell (x, y), which must be loaded. x may be outside
   /// [0, width) on a wrapping world.
@@ -151,6 +152,20 @@ class World {
   /// Restores the step counter (loading a save): the simulation's random
   /// choices depend on it.
   void set_tick(std::uint32_t tick) { tick_ = tick; }
+
+  // ---- bookkeeping for the simulator's scan (so a step costs what is active,
+  // not what the world's size is)
+  /// Slots (cy * width_chunks + cx) of every loaded chunk, in no particular order.
+  const std::vector<int>& loaded_slots() const { return loaded_; }
+  /// Between begin_step() and end_step(), wake-ups that give a chunk its first
+  /// dirty cells this step add its column to that chunk row's active list.
+  void begin_step();
+  void end_step() { stepping_ = false; }
+  /// Records chunk (cx, cy) as having dirty cells this step (sorted, no duplicates).
+  void note_active(int cx, int cy);
+  /// Columns of chunk row `cy` with dirty cells this step, ascending. May grow
+  /// during the step; read it afresh rather than holding iterators.
+  const std::vector<int>& active_columns(int cy) const { return active_rows_[static_cast<std::size_t>(cy)]; }
 
  private:
   std::size_t slot(int cx, int cy) const { return static_cast<std::size_t>(cy * width_chunks_ + cx); }
@@ -178,6 +193,9 @@ class World {
   std::uint32_t tick_ = 0;
   bool wrap_x_;
   std::vector<std::unique_ptr<Chunk>> chunks_;  // nullptr = not loaded
+  std::vector<int> loaded_;                     // slots of loaded chunks
+  std::vector<std::vector<int>> active_rows_;   // per chunk row, during a step
+  bool stepping_ = false;
 };
 
 }  // namespace px

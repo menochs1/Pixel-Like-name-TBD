@@ -35,8 +35,9 @@ struct PlayerInput {
 };
 
 /// The player: a box of cells that walks, jumps, swims and stands on the
-/// world. Solids and powders block it; air, liquids and gases do not. Cells
-/// outside the world or in unloaded chunks block it too.
+/// world. Solids and powders block it, except passable ones (tree trunks,
+/// leaves); air, liquids and gases do not. Cells outside the world or in
+/// unloaded chunks block it too.
 ///
 /// It does not change the world (yet), and the world does not know about it:
 /// sand can fall into its box, in which case it is pushed up out of it.

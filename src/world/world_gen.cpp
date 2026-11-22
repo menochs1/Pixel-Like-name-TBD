@@ -94,9 +94,11 @@ WorldGenerator::WorldGenerator(const BaseMaterials& ids, std::uint64_t seed, int
     : ids_(ids), seed_(seed), width_(width), height_(height), p_(params) {
   if (width <= 0 || height <= 0) throw std::invalid_argument("WorldGenerator: dimensions must be positive");
   sea_y_ = static_cast<int>(static_cast<float>(height_) * (p_.surface + p_.sea_level_offset));
-  tree_count_ = std::max(1, width_ / 26);
-  pool_cols_ = std::max(1, static_cast<int>(std::lround(static_cast<float>(width_) / 128.0f)));
-  pool_rows_ = std::max(1, height_ / 96);
+  s_ = std::max(p_.scale, 0.1f);
+  bedrock_ = static_cast<int>(std::lround(static_cast<float>(p_.bedrock_rows) * s_));
+  tree_count_ = std::max(1, static_cast<int>(static_cast<float>(width_) / (26.0f * s_)));
+  pool_cols_ = std::max(1, static_cast<int>(std::lround(static_cast<float>(width_) / (128.0f * s_))));
+  pool_rows_ = std::max(1, static_cast<int>(static_cast<float>(height_) / (96.0f * s_)));
 }
 
 // ------------------------------------------------------------------ helpers
@@ -117,14 +119,14 @@ int WorldGenerator::wrap_dx(int dx) const {
 float WorldGenerator::biome_value(int x) const {
   // Huge, slow features: biome regions roughly 1400 cells across (three around
   // a 4096-wide world, a dozen around a 16384-wide one).
-  return fbm(sub_seed(seed_, kBiome), width_, static_cast<float>(x), 137.0f, 1400.0f, 2);
+  return fbm(sub_seed(seed_, kBiome), width_, static_cast<float>(x), 137.0f * s_, 1400.0f * s_, 2);
 }
 
 WorldGenerator::Column WorldGenerator::column(int x) const {
   x = mod(x, width_);
   const float fx = static_cast<float>(x);
   const float b = biome_value(x);
-  const float jitter = 0.03f * fbm(sub_seed(seed_, kBiomeJitter), width_, fx, 11.0f, 90.0f, 1);
+  const float jitter = 0.03f * fbm(sub_seed(seed_, kBiomeJitter), width_, fx, 11.0f * s_, 90.0f * s_, 1);
 
   Column col{};
   col.biome = b + jitter < -0.22f ? Biome::Desert : (b + jitter > 0.28f ? Biome::Highlands : Biome::Meadow);
@@ -135,33 +137,33 @@ WorldGenerator::Column WorldGenerator::column(int x) const {
   const float w_high = smooth(0.18f, 0.38f, b);
   const float w_meadow = std::max(0.0f, 1.0f - w_desert - w_high);
   const float k = static_cast<float>(height_) / 1536.0f;  // terrain scales with world height
-  const float hills = fbm(sub_seed(seed_, kHills), width_, fx, 50.0f, 260.0f, 4);
-  const float dunes = fbm(sub_seed(seed_, kDunes), width_, fx, 50.0f, 70.0f, 2);
-  const float ridge = 1.0f - std::fabs(fbm(sub_seed(seed_, kPeaks), width_, fx, 50.0f, 240.0f, 2));
+  const float hills = fbm(sub_seed(seed_, kHills), width_, fx, 50.0f * s_, 260.0f * s_, 4);
+  const float dunes = fbm(sub_seed(seed_, kDunes), width_, fx, 50.0f * s_, 70.0f * s_, 2);
+  const float ridge = 1.0f - std::fabs(fbm(sub_seed(seed_, kPeaks), width_, fx, 50.0f * s_, 240.0f * s_, 2));
   const float rise = hills * (30.0f * w_desert + 70.0f * w_meadow + 110.0f * w_high) + dunes * 9.0f * w_desert +
                      ridge * ridge * 130.0f * w_high;
   const float base = static_cast<float>(height_) * p_.surface;
   col.surface = std::clamp(static_cast<int>(base - rise * k), height_ / 16, height_ / 2);
 
-  const float depth01 = 0.5f + 0.5f * fbm(sub_seed(seed_, kSoilDepth), width_, fx, 90.0f, 50.0f, 2);
+  const float depth01 = 0.5f + 0.5f * fbm(sub_seed(seed_, kSoilDepth), width_, fx, 90.0f * s_, 50.0f * s_, 2);
   switch (col.biome) {
     case Biome::Desert:
-      col.soil = 14 + static_cast<int>(16.0f * depth01);
+      col.soil = static_cast<int>(s_ * (14.0f + 16.0f * depth01));
       break;
     case Biome::Meadow:
-      col.soil = 7 + static_cast<int>(9.0f * depth01);
+      col.soil = static_cast<int>(s_ * (7.0f + 9.0f * depth01));
       break;
     case Biome::Highlands: {
       // Mostly bare rock with patches of soil.
-      const float n = fbm(sub_seed(seed_, kHighlandSoil), width_, fx, 80.0f, 40.0f, 2);
-      col.soil = n > 0.1f ? 2 + static_cast<int>(10.0f * n) : 0;
+      const float n = fbm(sub_seed(seed_, kHighlandSoil), width_, fx, 80.0f * s_, 40.0f * s_, 2);
+      col.soil = n > 0.1f ? static_cast<int>(s_ * (2.0f + static_cast<float>(static_cast<int>(10.0f * n)))) : 0;
       break;
     }
   }
   const bool dry = col.surface < sea_y_;
   col.grass = col.biome != Biome::Desert && col.soil > 0 && dry;
   col.entrance = col.biome != Biome::Desert && col.surface < sea_y_ - 2 &&
-                 fbm(sub_seed(seed_, kEntrance), width_, fx, 30.0f, 90.0f, 1) > 0.5f;
+                 fbm(sub_seed(seed_, kEntrance), width_, fx, 30.0f * s_, 90.0f * s_, 1) > 0.5f;
   return col;
 }
 
@@ -183,14 +185,17 @@ MaterialId WorldGenerator::tree_cell(int x, int y) const {
     if ((h & 0xFF) >= 150) continue;  // ~60% of slots have a tree
     const int tx = mod(static_cast<int>((static_cast<float>(k) + 0.15f + 0.7f * unit(h >> 8)) * spacing), width_);
     const int dx = wrap_dx(x - tx);
-    if (dx < -14 || dx > 14) continue;
+    const int reach = static_cast<int>(14.0f * s_);
+    if (dx < -reach || dx > reach) continue;
     const Column col = column(tx);
     if (col.biome != Biome::Meadow || !col.grass) continue;
-    const int height = 14 + static_cast<int>((h >> 24) & 15U);
-    const float radius = 6.0f + 0.7f * static_cast<float>((h >> 28) & 7U);
+    const int base_height = 14 + static_cast<int>((h >> 24) & 15U);
+    const int height = static_cast<int>(s_ * static_cast<float>(base_height));
+    const float radius = s_ * (6.0f + 0.7f * static_cast<float>((h >> 28) & 7U));
     const int top = col.surface - height;
-    const int trunk_w = height > 24 ? 3 : 2;
-    if (dx >= -1 && dx < trunk_w - 1 && y >= top + 2 && y < col.surface) return ids_.wood;
+    const int unit_w = std::max(1, static_cast<int>(std::lround(s_)));  // one trunk "cell", scaled
+    const int trunk_w = (base_height > 24 ? 3 : 2) * unit_w;
+    if (dx >= -unit_w && dx < trunk_w - unit_w && y >= top + 2 * unit_w && y < col.surface) return ids_.trunk;
     // Crown: two overlapping, slightly ragged ellipses of leaves.
     const float jitter = unit(cell_hash(seed_ ^ kLeaves, mod(x, width_), y, 0));
     const float fdx = static_cast<float>(dx), fdy = static_cast<float>(y - top) * 1.3f;
@@ -218,11 +223,11 @@ WorldGenerator::Bowl WorldGenerator::bowl_at(int x, int y) const {
   const int left = gx * cell_w, top = gy * cell_h;
   const int right = gx == pool_cols_ - 1 ? width_ : left + cell_w;
   const int bottom = gy == pool_rows_ - 1 ? height_ : top + cell_h;
-  constexpr int kShell = 5;
+  const float kShell = static_cast<float>(std::lround(5.0f * s_));  // whole cells
   // Radii and centre, chosen so bowl plus shell stays inside the grid cell.
-  const float rx = std::min(16.0f + 30.0f * unit(h >> 8), static_cast<float>(right - left) * 0.5f - kShell - 2);
-  const float ry = std::min(9.0f + 16.0f * unit(h >> 16), static_cast<float>(bottom - top) * 0.5f - kShell - 2);
-  if (rx < 6.0f || ry < 4.0f) return out;
+  const float rx = std::min(s_ * (16.0f + 30.0f * unit(h >> 8)), static_cast<float>(right - left) * 0.5f - kShell - 2);
+  const float ry = std::min(s_ * (9.0f + 16.0f * unit(h >> 16)), static_cast<float>(bottom - top) * 0.5f - kShell - 2);
+  if (rx < 6.0f * s_ || ry < 4.0f * s_) return out;
   const std::uint32_t h2 = hash32(h);
   const float span_x = static_cast<float>(right - left) - 2.0f * (rx + kShell + 1);
   const float span_y = static_cast<float>(bottom - top) - 2.0f * (ry + kShell + 1);
@@ -232,13 +237,13 @@ WorldGenerator::Bowl WorldGenerator::bowl_at(int x, int y) const {
   // Keep pools well below the deepest possible ground and soil, and clear of the bottom.
   const float k = static_cast<float>(height_) / 1536.0f;
   if (cy - ry < static_cast<float>(height_) * p_.surface + 150.0f * k) return out;
-  if (cy + ry + kShell >= static_cast<float>(height_ - p_.bedrock_rows)) return out;
+  if (cy + ry + kShell >= static_cast<float>(height_ - bedrock_)) return out;
 
   const float dx = static_cast<float>(x) - cx, dy = static_cast<float>(y) - cy;
   if (std::fabs(dx) > rx + kShell + 1 || std::fabs(dy) > ry + kShell + 1) return out;
   // Ragged outline: wobble the radius a little.
   const float wobble =
-      1.0f + 0.12f * fbm(sub_seed(seed_, kPools + 1), width_, static_cast<float>(x), static_cast<float>(y), 9.0f, 1);
+      1.0f + 0.12f * fbm(sub_seed(seed_, kPools + 1), width_, static_cast<float>(x), static_cast<float>(y), 9.0f * s_, 1);
   const float ex = dx / (rx * wobble), ey = dy / (ry * wobble);
   const float d = std::sqrt(ex * ex + ey * ey);
   const float shell = 1.0f + static_cast<float>(kShell) / std::min(rx, ry);
@@ -266,7 +271,8 @@ WorldGenerator::Bowl WorldGenerator::bowl_at(int x, int y) const {
 // ------------------------------------------------------------------ cells
 
 MaterialId WorldGenerator::underground(int x, int y, int depth, const Column& col) const {
-  const int bottom = height_ - p_.bedrock_rows;
+  const int bottom = height_ - bedrock_;
+  const int cave_start = static_cast<int>(p_.cave_start * s_);
   if (y >= bottom) return ids_.stone;
   const float fx = static_cast<float>(x), fy = static_cast<float>(y);
   const float t = fy / static_cast<float>(height_);
@@ -284,41 +290,42 @@ MaterialId WorldGenerator::underground(int x, int y, int depth, const Column& co
   // Caves: two layers of winding tunnels (thin bands where noise crosses zero)
   // plus large caverns (blobs where noise is high). Both grow with depth and
   // close up approaching the bottom.
-  const float to_bottom = std::min(1.0f, static_cast<float>(bottom - y) / 40.0f);
+  const float to_bottom = std::min(1.0f, static_cast<float>(bottom - y) / (40.0f * s_));
   // Large-scale cave density: some regions are riddled with tunnels, others
   // are nearly solid rock.
   const float density =
-      0.2f + 0.8f * smooth(-0.35f, 0.3f, fbm(sub_seed(seed_, kCaveRegion), width_, fx, fy, 450.0f, 2));
+      0.2f + 0.8f * smooth(-0.35f, 0.3f, fbm(sub_seed(seed_, kCaveRegion), width_, fx, fy, 450.0f * s_, 2));
   bool cave = false;
-  const bool tunnels_here = rock_depth >= static_cast<int>(p_.cave_start) || col.entrance;
+  const bool tunnels_here = rock_depth >= cave_start || col.entrance;
   if (tunnels_here) {
     float width = (0.022f + 0.03f * t) * to_bottom * density;
-    if (rock_depth < static_cast<int>(p_.cave_start)) width *= 0.7f;  // entrance shafts are narrower
+    if (rock_depth < cave_start) width *= 0.7f;  // entrance shafts are narrower
     if (width < 0.016f) width = 0.0f;  // tunnels end rather than thinning to hairlines
-    const float a = fbm(sub_seed(seed_, kTunnelA), width_, fx, fy, 120.0f, 2, 1.7f);
+    const float a = fbm(sub_seed(seed_, kTunnelA), width_, fx, fy, 120.0f * s_, 2, 1.7f);
     cave = std::fabs(a) < width;
-    if (!cave && rock_depth >= static_cast<int>(p_.cave_start)) {
-      const float b = fbm(sub_seed(seed_, kTunnelB), width_, fx, fy, 170.0f, 2, 2.2f);
+    if (!cave && rock_depth >= cave_start) {
+      const float b = fbm(sub_seed(seed_, kTunnelB), width_, fx, fy, 170.0f * s_, 2, 2.2f);
       cave = std::fabs(b) < width * 0.8f;
     }
   }
-  if (!cave && rock_depth >= static_cast<int>(p_.cave_start * 2.0f)) {
+  if (!cave && rock_depth >= static_cast<int>(p_.cave_start * 2.0f * s_)) {
     const float threshold = 0.46f - 0.16f * t + (1.0f - to_bottom) * 0.5f + (1.0f - density) * 0.3f;
-    cave = fbm(sub_seed(seed_, kCavern), width_, fx, fy, 200.0f, 3, 1.3f) > threshold;
+    cave = fbm(sub_seed(seed_, kCavern), width_, fx, fy, 200.0f * s_, 3, 1.3f) > threshold;
   }
   if (cave) return kEmpty;
 
   // Deposits in solid rock.
-  if (t > 0.3f && t < 0.75f && fbm(sub_seed(seed_, kCoal), width_, fx, fy, 46.0f, 2) > 0.48f) return ids_.coal;
-  if (t < 0.6f && fbm(sub_seed(seed_, kSandPocket), width_, fx, fy, 70.0f, 2) > 0.52f) return ids_.sand;
-  if (rock_depth < 140 && fbm(sub_seed(seed_, kDirtPocket), width_, fx, fy, 50.0f, 2) > 0.45f) return ids_.dirt;
+  if (t > 0.3f && t < 0.75f && fbm(sub_seed(seed_, kCoal), width_, fx, fy, 46.0f * s_, 2) > 0.48f) return ids_.coal;
+  if (t < 0.6f && fbm(sub_seed(seed_, kSandPocket), width_, fx, fy, 70.0f * s_, 2) > 0.52f) return ids_.sand;
+  if (rock_depth < static_cast<int>(140.0f * s_) && fbm(sub_seed(seed_, kDirtPocket), width_, fx, fy, 50.0f * s_, 2) > 0.45f)
+    return ids_.dirt;
   return ids_.stone;
 }
 
 MaterialId WorldGenerator::cell(int x, int y, const Column& col) const {
   if (y < col.surface) {
     if (y >= sea_y_) return ids_.water;  // a lake in a valley below sea level
-    if (y < col.surface - 60) return kEmpty;  // well above any tree
+    if (y < col.surface - static_cast<int>(60.0f * s_)) return kEmpty;  // well above any tree
     return tree_cell(x, y);
   }
   const int depth = y - col.surface;

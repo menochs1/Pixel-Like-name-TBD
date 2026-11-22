@@ -19,8 +19,8 @@ void Player::place(float x, float y) {
 bool Player::solid(const World& world, int x, int y) const {
   const MaterialId m = world.get(x, y);
   if (m == kOutOfBounds) return true;  // world edge or unloaded chunk
-  const Phase phase = world.materials().phase(m);
-  return phase == Phase::Solid || phase == Phase::Powder;
+  const MaterialProps& p = world.materials().props(m);
+  return (p.phase == Phase::Solid || p.phase == Phase::Powder) && !p.passable;
 }
 
 bool Player::blocked(const World& world, int x, int y) const {

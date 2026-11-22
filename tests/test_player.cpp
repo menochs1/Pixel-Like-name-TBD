@@ -254,3 +254,18 @@ TEST(player_treats_world_edges_and_unloaded_chunks_as_walls) {
   run(p, w, 200, left);
   CHECK_EQ(p.left(), 0);  // stopped at the world edge
 }
+
+TEST(player_walks_through_trees_but_not_walls) {
+  PlayerFixture f;
+  px::World w(4, 2, f.materials, 5);
+  w.fill_rect(0, kFloor, w.width(), 28, f.ids.stone);
+  w.fill_rect(80, 0, 8, kFloor, f.ids.trunk);    // a tree trunk, taller than any jump
+  w.fill_rect(60, 10, 50, 20, f.ids.leaves);
+  w.fill_rect(160, 0, 8, kFloor, f.ids.wood);    // a painted wooden wall
+  px::Player p;
+  p.place_on_ground(w, 40);
+  px::PlayerInput right;
+  right.right = true;
+  run(p, w, 200, right);
+  CHECK_EQ(p.left() + 16, 160);  // walked past the trunk, stopped by the wall
+}
