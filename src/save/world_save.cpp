@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x44575850;  // "PXWD"
-constexpr std::uint16_t kWorldVersion = 1;
+constexpr std::uint16_t kWorldVersion = 2;  // 2: player position; version 1 saves still load
 constexpr const char* kHeaderName = "world.pxw";
 constexpr const char* kChunkDirName = "chunks";
 
@@ -41,6 +41,9 @@ std::vector<std::uint8_t> encode_header(const World& world, const SaveInfo& info
   w.u32(world.tick());
   w.i32(info.view_x);
   w.i32(info.view_y);
+  w.u8(info.has_player ? 1 : 0);
+  w.f32(info.player_x);
+  w.f32(info.player_y);
   w.u8(info.generator ? 1 : 0);
   if (info.generator) {
     const WorldGenParams& g = *info.generator;
@@ -174,7 +177,8 @@ std::optional<OpenedSave> open_save(const fs::path& dir, MaterialRegistry& mater
     fail(error, "not a save header");
     return std::nullopt;
   }
-  if (r.u16() != kWorldVersion) {
+  const std::uint16_t version = r.u16();
+  if (version < 1 || version > kWorldVersion) {
     fail(error, "unsupported save format version");
     return std::nullopt;
   }
@@ -185,6 +189,11 @@ std::optional<OpenedSave> open_save(const fs::path& dir, MaterialRegistry& mater
   OpenedSave save;
   save.info.view_x = r.i32();
   save.info.view_y = r.i32();
+  if (version >= 2) {
+    save.info.has_player = r.u8() != 0;
+    save.info.player_x = r.f32();
+    save.info.player_y = r.f32();
+  }
   if (r.u8()) {
     WorldGenParams g;
     g.surface = r.f32();

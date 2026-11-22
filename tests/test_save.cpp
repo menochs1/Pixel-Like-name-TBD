@@ -300,3 +300,24 @@ TEST(streamer_regenerates_a_damaged_chunk_and_reports_it) {
   CHECK(w.loaded(1, 1));        // ...so it was regenerated rather than left as a hole
   CHECK(!streamer.last_error().empty());
 }
+
+TEST(saves_remember_the_player_and_the_view) {
+  SaveFixture f;
+  TempDir tmp;
+  px::World w(2, 2, f.materials, 6);
+  px::SaveInfo info;
+  info.view_x = -123;
+  info.view_y = 45;
+  info.has_player = true;
+  info.player_x = 1234.75f;
+  info.player_y = 56.5f;
+  CHECK(px::save_world(w, info, tmp.path / "p", nullptr));
+  std::optional<px::OpenedSave> save = px::open_save(tmp.path / "p", f.materials);
+  CHECK(save.has_value());
+  if (!save) return;
+  CHECK_EQ(save->info.view_x, -123);
+  CHECK_EQ(save->info.view_y, 45);
+  CHECK(save->info.has_player);
+  CHECK(save->info.player_x == 1234.75f);
+  CHECK(save->info.player_y == 56.5f);
+}

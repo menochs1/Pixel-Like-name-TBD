@@ -20,6 +20,8 @@ struct SaveInfo {
   /// these parameters, or (nullopt) left empty.
   std::optional<WorldGenParams> generator;
   int view_x = 0, view_y = 0;  // where the camera was (a hint for the app)
+  bool has_player = false;     // where the player stood (top-left of its box)
+  float player_x = 0.0f, player_y = 0.0f;
 };
 
 /// A save is a directory:

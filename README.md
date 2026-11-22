@@ -120,8 +120,11 @@ tower, a water basin and a lava crucible).
 
 | Input | Action |
 | --- | --- |
-| `WASD` / arrows | Move the camera (`Shift` = faster) |
-| Middle mouse drag | Move the camera |
+| `A` / `D`, ← / → | Walk |
+| `W` / ↑ / `Space` | Jump (hold for higher); in water: swim up |
+| `S` / ↓ | Swim down |
+| `Tab` | Free camera on/off: `WASD` / arrows then move the view (`Shift` = faster) and the character waits |
+| Middle mouse drag | Move the camera (free camera) |
 | `Home` | Back to the starting point |
 | Left mouse | Use the current tool: paint, heat or cool |
 | Right mouse | Erase |
@@ -133,7 +136,7 @@ tower, a water basin and a lava crucible).
 | `J` | Cool brush |
 | `I` | Pixel inspector on/off (on at start) |
 | `T` | Heat view (temperature map) |
-| `Space` | Pause / resume |
+| `P` | Pause / resume |
 | `.` | Single step while paused |
 | `F5` | Save (to `saves/quicksave`) |
 | `F9` | Load (from `saves/quicksave`) |
@@ -166,6 +169,7 @@ cmake --build build-asan && ./build-asan/px_tests && ./build-asan/pixel_stress
 ```
 src/core/     material registry, chunk storage, world, simulator (no dependencies)
 src/world/    seeded world generation, demo scenes
+src/entities/ the player character (movement and collision; no rendering)
 src/sandbox/  sandbox tools: heat/cool brushes, pixel inspector (no rendering)
 src/save/     chunk encoding, saves, chunk store and streaming
 src/render/   World -> ARGB pixel buffer, built-in 3x5 font (no SDL)
@@ -217,6 +221,34 @@ Each step (`px::step`, fixed at 60 per second):
 Chunking is purely an optimisation: tests check that the chunked simulation
 produces exactly the same materials and temperatures as updating every cell
 every step, including with fire, lava, steam and ice.
+
+### The player
+
+`src/entities/player.hpp`: a 16×32 character that walks, jumps, swims and
+stands on the world. It is simulation, not rendering: deterministic and
+tested headless. `src/render/sprites.cpp` draws it, with a standing pose, a
+two-frame walk and a jump pose, mirrored when facing left.
+
+- **Collision:** solids and powders (sand) block it; air, liquids and gases do
+  not. The world edges and unloaded chunks count as walls. It moves one axis
+  at a time, cell by cell, so it never passes through thin walls.
+- **Movement:** walks at 90 cells/s with a little acceleration, steps up
+  ledges up to 4 cells high (the terrain is pixel-rough), stays on the ground
+  walking down slopes, and jumps about 36 cells. A short tap gives a lower
+  hop, and a jump still works for a few steps after walking off a ledge.
+- **Water:** with at least half the body under, it is buoyant and slowed;
+  jump swims up, down dives, and a jump near the surface leaps out.
+- **Solid to the simulation:** during each step its body fills the empty
+  cells of its box with a hidden `body` material (`Player::occupy`), and they
+  are emptied right after (`release`). Sand piles on its head and slides off
+  its shoulders, water flows around it, and when it walks away what rested on
+  it falls. The body is never in the world between steps, so it is never
+  drawn, inspected or saved. If something is painted into its box anyway, it
+  is pushed out upward.
+- **Tuning:** every number (size, speeds, gravity, jump, step-up, swimming)
+  is a field of `PlayerParams`.
+- Saves remember where it stood. The header format is now version 2;
+  version 1 saves still load, with the character dropped in at the camera.
 
 ### Sandbox tools
 

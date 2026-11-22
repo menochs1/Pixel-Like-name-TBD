@@ -43,6 +43,7 @@ add_library(px_core
   src/save/chunk_store.cpp
   src/save/world_save.cpp
   src/save/streamer.cpp
+  src/entities/player.cpp
 )
 target_include_directories(px_core PUBLIC src)
 find_package(Threads REQUIRED)  # world generation fills chunks in parallel
@@ -50,7 +51,7 @@ target_link_libraries(px_core PUBLIC Threads::Threads)
 target_compile_options(px_core PRIVATE ${PX_WARNINGS})
 
 # --- Rendering: turns a World into an ARGB pixel buffer. Still no SDL.
-add_library(px_render src/render/pixel_renderer.cpp src/render/text.cpp)
+add_library(px_render src/render/pixel_renderer.cpp src/render/text.cpp src/render/sprites.cpp)
 target_link_libraries(px_render PUBLIC px_core)
 target_compile_options(px_render PRIVATE ${PX_WARNINGS})
 
@@ -85,7 +86,7 @@ endif()
 
 if(PX_BUILD_TESTS)
   enable_testing()
-  add_executable(px_tests tests/test_main.cpp tests/test_simulation.cpp tests/test_world_gen.cpp tests/test_materials.cpp tests/test_tools.cpp tests/test_save.cpp)
+  add_executable(px_tests tests/test_main.cpp tests/test_simulation.cpp tests/test_world_gen.cpp tests/test_materials.cpp tests/test_tools.cpp tests/test_save.cpp tests/test_player.cpp)
   target_link_libraries(px_tests PRIVATE px_render)  # px_render includes px_core
   target_compile_options(px_tests PRIVATE ${PX_WARNINGS})
   add_test(NAME px_tests COMMAND px_tests)

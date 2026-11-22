@@ -48,7 +48,11 @@ Implement in this order. Progress as of 2026-11-21: ✅ done · 🟡 partly done
    Done: paint/erase brushes for every material, heat and cool brushes (melt
    rock, harden lava, boil, freeze, ignite, extinguish), a pixel inspector
    showing each pixel's properties, a heat view and an active-region view.
-6. Character controller — ⬜ Not started.
+6. Character controller — 🟡 Started: a 16×32 player that walks, jumps (with
+   coyote time and variable height), steps up small ledges, swims, is solid
+   to the simulation (sand piles on it, water flows around it), and is
+   followed by the camera. Not yet: digging/interaction tools, health and
+   damage (fire, lava), pushing through powders.
 7. Lighting — ⬜ Not started.
 8. Optional combat and multiplayer — ⬜ Not started.
 

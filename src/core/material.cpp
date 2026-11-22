@@ -573,6 +573,21 @@ BaseMaterials register_base_materials(MaterialRegistry& registry) {
     ids.tar = add(d);
   }
 
+  {
+    // Where the player stands, for the length of one simulation step
+    // (Player::occupy/release): solid, so sand piles on it and water flows
+    // around it, and insulating, so it does not soak up heat. Never left in
+    // the world between steps.
+    MaterialDef d;
+    d.name = "body";
+    d.phase = Phase::Solid;
+    d.density = 1000;
+    d.color = {255, 0, 255};  // never drawn: a visible magenta if it ever leaks
+    d.conductivity = 0.0f;
+    d.internal = true;
+    ids.body = add(d);
+  }
+
   // Pair reactions for contact effects that temperature alone does not give.
   registry.add_reaction("lava", "water", "stone", "steam", 0.35f);
   registry.add_reaction("fire", "water", "smoke", "steam", 0.5f);    // doused

@@ -1,9 +1,13 @@
-// Interactive sandbox: explore a generated world, paint materials and watch
-// them simulate.
+// Interactive sandbox: explore a generated world as a little character, paint
+// materials and watch them simulate.
 //
 // Controls
-//   WASD / arrows  move the camera (hold Shift to move faster)
-//   Middle mouse   drag to move the camera
+//   A / D, arrows  walk
+//   W / Up / Space jump (hold for a higher jump; in water: swim up)
+//   S / Down       swim down
+//   Tab            free camera on/off: WASD / arrows then move the camera
+//                  (Shift = faster) and the character waits where it is
+//   Middle mouse   drag to move the camera (free camera)
 //   Home           back to the starting point
 //   Left mouse     use the current tool (paint, heat or cool)
 //   Right mouse    erase
@@ -16,7 +20,7 @@
 //   J              cool brush: freezes water, hardens lava, puts out fire
 //   I              toggle the pixel inspector (what is under the cursor)
 //   T              toggle heat view (temperature map)
-//   Space          pause / resume
+//   P              pause / resume
 //   . (period)     single step while paused
 //   F5             save (to saves/quicksave)
 //   F9             load (from saves/quicksave)
@@ -55,7 +59,9 @@
 #include "core/rng.hpp"
 #include "core/simulator.hpp"
 #include "core/world.hpp"
+#include "entities/player.hpp"
 #include "render/pixel_renderer.hpp"
+#include "render/sprites.hpp"
 #include "render/text.hpp"
 #include "sandbox/tools.hpp"
 #include "save/chunk_store.hpp"
@@ -101,6 +107,12 @@ struct Session {
   std::optional<px::WorldGenParams> gen_params;   // recorded in saves
   std::unique_ptr<px::ChunkStreamer> streamer;
   double home_x = 0.0, home_y = 0.0;              // camera start
+  px::Player player;
+  bool player_placed = false;                     // placed once its chunks are loaded
+  float spawn_x = 0.0f;                           // start: left edge of the player...
+  int spawn_from_y = 0;                           // ...dropped onto the ground below this row
+  bool restore_player = false;                    // from a save: put it exactly here instead
+  float saved_x = 0.0f, saved_y = 0.0f;
 };
 
 /// A scratch directory for the chunks this session unloads.
@@ -183,6 +195,7 @@ int main(int argc, char** argv) {
     if (demo) {
       session->world = std::make_unique<px::World>(kDemoChunksX, kDemoChunksY, materials, s);
       px::build_demo_scene(*session->world, ids);
+      session->spawn_x = 12.0f;  // on the ground left of the water basin
       return session;
     }
     session->world = std::make_unique<px::World>(kWorldChunksX, kWorldChunksY, materials, s, px::EdgeX::Wrap,
@@ -193,6 +206,8 @@ int main(int argc, char** argv) {
     session->home_x = session->world->width() / 2.0 - w / 2.0;
     session->home_y =
         std::clamp(session->generator->surface_y(session->world->width() / 2) - h / 3, 0, session->world->height() - h);
+    session->spawn_x = static_cast<float>(session->world->width() / 2 - 8);
+    session->spawn_from_y = session->generator->surface_y(session->world->width() / 2) - 80;  // above the trees
     return session;
   };
   // Saves always load streamed, whatever they came from.
@@ -210,6 +225,11 @@ int main(int argc, char** argv) {
     session->store->set_base(save->chunk_dir, save->remap);
     session->home_x = save->info.view_x;
     session->home_y = save->info.view_y;
+    session->spawn_x = static_cast<float>(save->info.view_x + w / 2 - 8);
+    session->spawn_from_y = save->info.view_y;
+    session->restore_player = save->info.has_player;
+    session->saved_x = save->info.player_x;
+    session->saved_y = save->info.player_y;
     return session;
   };
 
@@ -262,6 +282,7 @@ int main(int argc, char** argv) {
   enum class Tool { Paint, Heat, Cool };
   Tool tool = Tool::Paint;
   bool show_inspector = true;
+  bool free_camera = false;
   auto tool_name = [&]() -> std::string {
     switch (tool) {
       case Tool::Heat: return "heat brush";
@@ -328,7 +349,7 @@ int main(int argc, char** argv) {
     const int n = static_cast<int>(materials.size());
     int m = brush.material;
     do m = (m + dir + n) % n;
-    while (m == px::kEmpty);
+    while (m == px::kEmpty || materials.def(static_cast<px::MaterialId>(m)).internal);
     brush.material = static_cast<px::MaterialId>(m);
   };
 
@@ -379,7 +400,12 @@ int main(int argc, char** argv) {
         case SDL_KEYDOWN:
           switch (e.key.keysym.sym) {
             case SDLK_ESCAPE: running = false; break;
-            case SDLK_SPACE: paused = !paused; break;
+            case SDLK_p: paused = !paused; break;
+            case SDLK_TAB:
+              free_camera = !free_camera;
+              show(free_camera ? "free camera: WASD moves the view (Tab: back to the character)"
+                               : "following the character");
+              break;
             case SDLK_PERIOD: single_step = true; break;
             case SDLK_1: brush.material = ids.sand; tool = Tool::Paint; break;
             case SDLK_2: brush.material = ids.water; tool = Tool::Paint; break;
@@ -405,6 +431,9 @@ int main(int argc, char** argv) {
               info.generator = session->gen_params;
               info.view_x = cam_ix();
               info.view_y = cam_iy();
+              info.has_player = session->player_placed;
+              info.player_x = session->player.x();
+              info.player_y = session->player.y();
               std::string error;
               if (px::save_world(world, info, kQuickSave, session->store.get(), &error)) {
                 if (session->store) px::mark_saved(world, *session->store, kQuickSave);
@@ -428,6 +457,8 @@ int main(int argc, char** argv) {
             case SDLK_HOME:
               cam_x = session->home_x;
               cam_y = session->home_y;
+              session->player_placed = false;  // back to the start, once its chunks are loaded
+              session->restore_player = false;
               break;
             default: break;
           }
@@ -447,7 +478,7 @@ int main(int argc, char** argv) {
           }
           break;
         case SDL_MOUSEMOTION:
-          if (panning && !demo) {
+          if (panning && !demo && free_camera) {
             cam_x -= e.motion.x - pan_x;
             cam_y -= e.motion.y - pan_y;
             pan_x = e.motion.x;
@@ -476,14 +507,30 @@ int main(int argc, char** argv) {
     const double dt = std::chrono::duration<double>(now - previous).count();
     previous = now;
 
-    // Camera movement from the keyboard.
-    if (!demo) {
-      const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    // Keyboard: the character, or the camera in free-camera mode.
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    px::PlayerInput input;
+    if (free_camera && !demo) {
       const double speed = kCameraSpeed * std::min(dt, 0.1) * (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT] ? 3.0 : 1.0);
       if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]) cam_x -= speed;
       if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) cam_x += speed;
       if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) cam_y -= speed;
       if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) cam_y += speed;
+      clamp_camera();
+    } else if (!free_camera) {
+      input.left = keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT];
+      input.right = keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT];
+      input.jump = keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_SPACE];
+      input.down = keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN];
+    }
+    // The camera follows the character, easing toward it.
+    px::Player& player = session->player;
+    if (!free_camera && !demo && session->player_placed) {
+      const double tx = player.x() + player.params().width / 2.0 - w / 2.0;
+      const double ty = player.y() + player.params().height / 2.0 - h * 0.55;
+      const double k = std::min(1.0, dt * 8.0);
+      cam_x += (tx - cam_x) * k;
+      cam_y += (ty - cam_y) * k;
       clamp_camera();
     }
 
@@ -503,6 +550,19 @@ int main(int argc, char** argv) {
       session->streamer->update(grow(kRequiredMargin), grow(kPrefetchMargin), grow(kKeepMargin), kPrefetchPerFrame);
       if (!session->streamer->last_error().empty() && toast_time <= 0.0) show(session->streamer->last_error());
     }
+    // Put the character in the world once the ground under it is loaded.
+    if (!session->player_placed && world.in_bounds(static_cast<int>(session->spawn_x), std::max(session->spawn_from_y, 0))) {
+      if (session->restore_player) player.place(session->saved_x, session->saved_y);
+      else player.place_on_ground(world, session->spawn_x, session->spawn_from_y);
+      session->player_placed = true;
+    }
+    // It only moves while the chunks around it are loaded (in free-camera
+    // mode it can be left far behind; it waits there).
+    auto player_loaded = [&] {
+      const int l = player.left(), t = player.top();
+      const int r = l + player.params().width - 1, b = t + player.params().height - 1;
+      return world.in_bounds(l, t) && world.in_bounds(r, t) && world.in_bounds(l, b) && world.in_bounds(r, b);
+    };
 
     // Holding the button still keeps pouring at the cursor.
     int wx = 0, wy = 0;
@@ -526,8 +586,14 @@ int main(int argc, char** argv) {
         px::apply_thermal_brush(world, mx + cam_ix(), my + cam_iy(), brush.radius,
                                 tool == Tool::Heat ? px::kHeatBrush : px::kCoolBrush);
       }
+      const bool move_player = session->player_placed && player_loaded();
+      if (move_player) {
+        player.update(world, input);
+        player.occupy(world);  // solid to the simulation for this step
+      }
       const auto t0 = clock::now();
       last_stats = px::step(world, region);
+      if (move_player) player.release(world);
       const double step_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
       sim_ms_sum += step_ms;
       frame_sim_ms += step_ms;
@@ -543,6 +609,16 @@ int main(int argc, char** argv) {
     if (show_heat) renderer.render_temperature(world, pixels.data(), w, view);
     else renderer.render(world, pixels.data(), w, view);
     if (show_dirty) renderer.draw_dirty_rects(world, pixels.data(), w, view);
+    if (session->player_placed) {
+      int sx = player.left() - cam_ix();
+      if (world.wraps_x()) {  // the copy of it nearest the view
+        const int ww = world.width();
+        sx = ((sx + ww / 2) % ww + ww) % ww - ww / 2;
+      }
+      px::draw_player(pixels.data(), w, w, h, sx, player.top() - cam_iy(),
+                      px::player_pose(player.on_ground() || player.in_liquid(), player.walk_steps()),
+                      player.facing_left());
+    }
     const std::uint32_t outline = tool == Tool::Heat ? 0xFFFF7040U : (tool == Tool::Cool ? 0xFF60C0FFU : 0xFFE8E8F0U);
     draw_brush_outline(pixels.data(), w, h, mx, my, brush.radius, outline);
     if (show_inspector) {

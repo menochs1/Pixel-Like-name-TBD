@@ -85,6 +85,10 @@ struct MaterialDef {
   float emit_chance = 0.0f;
 
   std::uint16_t durability = 0;  // damage a cell takes before it breaks (World::damage); 0 = breaks at once
+
+  /// Used by the engine itself (the player's body) and not offered as a
+  /// paintable material.
+  bool internal = false;
 };
 
 /// Hot, resolved per-material properties used by the simulator's inner loop.
@@ -279,6 +283,7 @@ struct BaseMaterials {
   MaterialId leaves = kEmpty;
   MaterialId basalt = kEmpty;
   MaterialId tar = kEmpty;
+  MaterialId body = kEmpty;
 };
 
 /// Registers the built-in materials and reactions, finalizes the registry and
